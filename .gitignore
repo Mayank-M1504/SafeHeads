@@ -17,13 +17,7 @@
 *.tiff
 *.webp
 
-# Model files
-*.pt
-*.pth
-*.onnx
-*.tflite
-*.h5
-*.pb
+
 
 # Python cache and compiled files
 __pycache__/
