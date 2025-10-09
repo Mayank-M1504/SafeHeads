@@ -37,6 +37,39 @@ If you cannot read the number plate clearly, return "unreadable".
 Do not include any other information or analysis.
 """
 
+# Number plate validation settings
+MIN_PLATE_LENGTH = 8  # Minimum characters for a valid Indian number plate
+MAX_PLATE_LENGTH = 15  # Maximum characters for a valid Indian number plate
+
+def normalize_plate_text(plate_text):
+    """Normalize number plate text by removing dashes, spaces, and converting to uppercase."""
+    if not plate_text or plate_text.lower() in ['unreadable', 'error', 'gemini_not_configured']:
+        return None
+    
+    # Remove dashes, spaces, and convert to uppercase
+    normalized = plate_text.replace('-', '').replace(' ', '').upper()
+    return normalized
+
+def is_valid_plate(plate_text):
+    """Check if the plate text is valid and complete."""
+    normalized = normalize_plate_text(plate_text)
+    
+    if not normalized:
+        return False
+    
+    # Check length
+    if len(normalized) < MIN_PLATE_LENGTH or len(normalized) > MAX_PLATE_LENGTH:
+        return False
+    
+    # Check if it contains at least some letters and numbers
+    has_letter = any(c.isalpha() for c in normalized)
+    has_digit = any(c.isdigit() for c in normalized)
+    
+    if not (has_letter and has_digit):
+        return False
+    
+    return True
+
 def list_available_gemini_models():
     """List available Gemini models for debugging."""
     if not GEMINI_API_KEY:
@@ -179,6 +212,7 @@ class ViolationImageProcessor:
     def __init__(self):
         self.processed_files = set()
         self.results = []
+        self.seen_plates = set()  # Track normalized plates to avoid duplicates
         
         # Create directories
         os.makedirs(PROCESSED_DIR, exist_ok=True)
@@ -233,7 +267,26 @@ class ViolationImageProcessor:
             # Read number plate with Gemini
             print(f"🤖 Reading number plate with Gemini...")
             plate_text = read_number_plate_with_gemini(enhanced_path)
-            print(f"🔖 Number plate: {plate_text}")
+            print(f"🔖 Raw plate text: {plate_text}")
+            
+            # Validate and normalize plate text
+            normalized_plate = normalize_plate_text(plate_text)
+            
+            if not is_valid_plate(plate_text):
+                print(f"❌ Invalid plate: '{plate_text}' (normalized: '{normalized_plate}') - Skipping")
+                # Still mark as processed to avoid reprocessing
+                self.processed_files.add(filename)
+                return
+            
+            # Check for duplicates
+            if normalized_plate in self.seen_plates:
+                print(f"🔄 Duplicate plate detected: '{plate_text}' (normalized: '{normalized_plate}') - Skipping")
+                # Still mark as processed to avoid reprocessing
+                self.processed_files.add(filename)
+                return
+            
+            # Add to seen plates
+            self.seen_plates.add(normalized_plate)
             
             # Create result record
             result = {
@@ -243,6 +296,7 @@ class ViolationImageProcessor:
                 'resolution': f"{width}x{height}",
                 'confidence': confidence,
                 'plate_text': plate_text,
+                'normalized_plate': normalized_plate,
                 'timestamp': time.time(),
                 'processed_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -264,6 +318,7 @@ class ViolationImageProcessor:
                 self.results = self.results[-1000:]
             
             print(f"✅ Processing complete: {filename}")
+            print(f"   🔖 Plate: '{plate_text}' → '{normalized_plate}'")
             print(f"   📄 Result saved: {result_filename}")
             
         except Exception as e:
@@ -375,14 +430,20 @@ class ParallelImagePipeline:
     
     def get_status(self):
         """Get pipeline status."""
+        unique_plates = len(self.processor.seen_plates) if self.processor else 0
         return {
             'is_running': self.is_running,
             'monitored_directory': BASE_DIR,
             'processed_directory': PROCESSED_DIR,
             'results_directory': RESULTS_DIR,
             'total_processed': len(self.processor.results) if self.processor else 0,
+            'unique_plates': unique_plates,
             'gemini_configured': bool(GEMINI_API_KEY),
-            'poll_interval': self.poll_interval
+            'poll_interval': self.poll_interval,
+            'validation_settings': {
+                'min_plate_length': MIN_PLATE_LENGTH,
+                'max_plate_length': MAX_PLATE_LENGTH
+            }
         }
 
 # =============================
