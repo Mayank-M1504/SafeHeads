@@ -150,9 +150,10 @@ A comprehensive real-time video streaming application with AI-powered object det
    echo "OCR_API_KEY=your_ocr_api_key_here" > backend/.env
    ```
 
-2. **Place your YOLO model files in the project root:**
+2. **YOLO model files are included in the repository:**
    - `best.pt` (vehicle detection model)
    - `best-helmet-2.pt` (helmet detection model)
+   - `yolov8n.pt` (YOLOv8 nano model)
 
 ### Backend Setup
 
@@ -260,8 +261,9 @@ Safehead/
 │   ├── vite.config.js           # Vite configuration
 │   └── index.html               # HTML template
 ├── .gitignore                   # Root git ignore file
-├── best.pt                      # Vehicle detection model
-├── best-helmet-2.pt            # Helmet detection model
+├── best.pt                      # Vehicle detection model (included)
+├── best-helmet-2.pt            # Helmet detection model (included)
+├── yolov8n.pt                  # YOLOv8 nano model (included)
 └── README.md                    # This file
 ```
 
