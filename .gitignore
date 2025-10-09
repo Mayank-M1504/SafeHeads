@@ -17,6 +17,14 @@
 *.tiff
 *.webp
 
+# Model files - ALLOWED to be tracked by Git
+# *.pt
+# *.pth
+# *.onnx
+# *.tflite
+# *.h5
+# *.pb
+
 
 
 # Python cache and compiled files
