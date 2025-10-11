@@ -1,0 +1,21 @@
+# Database Configuration
+DATABASE_URL=postgresql://postgres:your_password_here@localhost:5432/safehead_violations
+
+# Cloudinary Configuration
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+
+# Gemini AI Configuration
+GEMINI_API_KEY=your_gemini_api_key
+
+# Violations API Configuration
+VIOLATIONS_API_URL=http://localhost:5001
+VIOLATIONS_API_PORT=5001
+
+# Flask Configuration
+SECRET_KEY=your-secret-key-here
+
+# Optional: Location and Camera Information
+DEFAULT_LOCATION=Traffic Intersection 1
+DEFAULT_CAMERA_ID=CAM001

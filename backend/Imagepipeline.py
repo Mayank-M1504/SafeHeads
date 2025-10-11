@@ -9,6 +9,8 @@ import json
 import threading
 import google.generativeai as genai
 from dotenv import load_dotenv
+from datetime import datetime
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -29,46 +31,138 @@ if GEMINI_API_KEY:
 else:
     print("⚠️  Gemini API key not found. Set GEMINI_API_KEY in .env file")
 
-# Simple prompt for number plate reading only
+# Database and Cloudinary Configuration
+VIOLATIONS_API_URL = os.getenv('VIOLATIONS_API_URL', 'http://localhost:5001')
+CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME', '')
+CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY', '')
+CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET', '')
+
+# Enhanced prompt for number plate reading including two-line plates
+
 PLATE_READING_PROMPT = """
 Look at this image and extract ONLY the number plate text.
-Return the text exactly as you see it on the number plate.
+
+IMPORTANT: The number plate must follow this exact format:
+- 2 alphabets + 2 digits + 1 or 2 alphabets + 3 or 4 digits
+- Example: MH12AB1234 or KA01CD567
+
+This number plate may be in one line or two lines.
+If it's a two-line number plate, combine both lines into a single line of text.
+Return the complete text exactly as you see it on the number plate.
+
+If the number plate does not match the required format (2 letters + 2 digits + 1-2 letters + 3-4 digits), return "invalid_format".
 If you cannot read the number plate clearly, return "unreadable".
 Do not include any other information or analysis.
 """
 
 # Number plate validation settings
 MIN_PLATE_LENGTH = 8  # Minimum characters for a valid Indian number plate
-MAX_PLATE_LENGTH = 15  # Maximum characters for a valid Indian number plate
+MAX_PLATE_LENGTH = 20  # Maximum characters for a valid Indian number plate (increased for two-line plates)
 
 def normalize_plate_text(plate_text):
-    """Normalize number plate text by removing dashes, spaces, and converting to uppercase."""
+    """Normalize number plate text by removing dashes, spaces, newlines, and converting to uppercase."""
     if not plate_text or plate_text.lower() in ['unreadable', 'error', 'gemini_not_configured']:
         return None
     
-    # Remove dashes, spaces, and convert to uppercase
-    normalized = plate_text.replace('-', '').replace(' ', '').upper()
+    # Remove dashes, spaces, newlines, and convert to uppercase
+    normalized = plate_text.replace('-', '').replace(' ', '').replace('\n', '').replace('\r', '').upper()
     return normalized
 
 def is_valid_plate(plate_text):
-    """Check if the plate text is valid and complete."""
+    """Check if the plate text is valid and follows Indian number plate format."""
     normalized = normalize_plate_text(plate_text)
     
     if not normalized:
         return False
     
-    # Check length
-    if len(normalized) < MIN_PLATE_LENGTH or len(normalized) > MAX_PLATE_LENGTH:
+    # Check for invalid responses from Gemini
+    if normalized in ['UNREADABLE', 'INVALID_FORMAT', 'ERROR', 'GEMINI_NOT_CONFIGURED']:
         return False
     
-    # Check if it contains at least some letters and numbers
-    has_letter = any(c.isalpha() for c in normalized)
-    has_digit = any(c.isdigit() for c in normalized)
+    # Check length (Indian plates are typically 8-10 characters)
+    if len(normalized) < 8 or len(normalized) > 10:
+        return False
     
-    if not (has_letter and has_digit):
+    # Check Indian number plate format: 2 letters + 2 digits + 1-2 letters + 3-4 digits
+    import re
+    pattern = r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{3,4}$'
+    
+    if not re.match(pattern, normalized):
         return False
     
     return True
+
+def upload_to_cloudinary(image_path, public_id):
+    """Upload image to Cloudinary and return URL and public_id."""
+    if not all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET]):
+        print("⚠️ Cloudinary credentials not configured")
+        print(f"   Cloud Name: {CLOUDINARY_CLOUD_NAME}")
+        print(f"   API Key: {'*' * len(CLOUDINARY_API_KEY) if CLOUDINARY_API_KEY else 'Not set'}")
+        print(f"   API Secret: {'*' * len(CLOUDINARY_API_SECRET) if CLOUDINARY_API_SECRET else 'Not set'}")
+        return None
+    
+    try:
+        import cloudinary
+        import cloudinary.uploader
+        
+        # Configure Cloudinary
+        cloudinary.config(
+            cloud_name=CLOUDINARY_CLOUD_NAME,
+            api_key=CLOUDINARY_API_KEY,
+            api_secret=CLOUDINARY_API_SECRET
+        )
+        
+        print(f"☁️ Cloudinary configured for cloud: {CLOUDINARY_CLOUD_NAME}")
+        print(f"📁 Uploading image: {image_path}")
+        
+        # Upload image
+        result = cloudinary.uploader.upload(
+            image_path,
+            folder="violations",
+            public_id=public_id,
+            resource_type="image"
+        )
+        
+        print(f"✅ Upload successful!")
+        print(f"   URL: {result.get('url')}")
+        print(f"   Public ID: {result.get('public_id')}")
+        
+        return {
+            'url': result.get('url'),
+            'public_id': result.get('public_id')
+        }
+        
+    except Exception as e:
+        print(f"❌ Error uploading to Cloudinary: {e}")
+        print(f"   Image path: {image_path}")
+        print(f"   Public ID: {public_id}")
+        return None
+
+def save_violation_to_database(violation_data):
+    """Save violation data to the violations database via API."""
+    try:
+        print(f"📡 Sending violation data to API: {VIOLATIONS_API_URL}/api/violations")
+        print(f"📊 Data: {violation_data['number_plate']} - {violation_data['image_url']}")
+        
+        response = requests.post(
+            f"{VIOLATIONS_API_URL}/api/violations",
+            json=violation_data,
+            timeout=10
+        )
+        
+        print(f"📡 API Response: {response.status_code}")
+        
+        if response.status_code == 201:
+            print(f"✅ Violation saved to database: {violation_data['number_plate']}")
+            return True
+        else:
+            print(f"❌ Failed to save violation: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error saving to database: {e}")
+        print(f"   API URL: {VIOLATIONS_API_URL}/api/violations")
+        return False
 
 def list_available_gemini_models():
     """List available Gemini models for debugging."""
@@ -264,9 +358,9 @@ class ViolationImageProcessor:
             cv2.imwrite(enhanced_path, enhanced_img)
             print(f"✅ Enhanced image saved: {enhanced_filename}")
             
-            # Read number plate with Gemini
+            # Read number plate with Gemini using raw image (better for two-line plates)
             print(f"🤖 Reading number plate with Gemini...")
-            plate_text = read_number_plate_with_gemini(enhanced_path)
+            plate_text = read_number_plate_with_gemini(image_path)  # Use raw image for better OCR accuracy
             print(f"🔖 Raw plate text: {plate_text}")
             
             # Validate and normalize plate text
@@ -288,6 +382,42 @@ class ViolationImageProcessor:
             # Add to seen plates
             self.seen_plates.add(normalized_plate)
             
+            # Only process valid plates for database storage
+            print(f"✅ Valid plate detected: '{plate_text}' (normalized: '{normalized_plate}') - Processing for database...")
+            
+            # Upload to Cloudinary
+            public_id = f"violation_{int(time.time())}_{vehicle_id}"
+            print(f"☁️ Uploading image to Cloudinary with public_id: {public_id}")
+            cloudinary_result = upload_to_cloudinary(image_path, public_id)
+            
+            if cloudinary_result:
+                print(f"✅ Cloudinary upload successful: {cloudinary_result['url']}")
+                # Prepare violation data for database
+                violation_data = {
+                    'number_plate': normalized_plate,
+                    'violation_type': 'no_helmet',
+                    'violation_description': 'Helmet violation detected - no helmet worn',
+                    'image_url': cloudinary_result['url'],
+                    'image_public_id': cloudinary_result['public_id'],
+                    'violation_timestamp': datetime.fromtimestamp(time.time()).isoformat(),
+                    'confidence_score': confidence,
+                    'vehicle_id': vehicle_id,
+                    'crop_filename': filename,
+                    'location': 'Unknown',  # Can be enhanced later
+                    'camera_id': 'Unknown',  # Can be enhanced later
+                    'status': 'active'
+                }
+                
+                print(f"📊 Violation data prepared: {violation_data['number_plate']} - {violation_data['image_url']}")
+                
+                # Save to database
+                if save_violation_to_database(violation_data):
+                    print(f"💾 Violation data saved to database successfully")
+                else:
+                    print(f"⚠️ Failed to save violation data to database")
+            else:
+                print(f"❌ Failed to upload image to Cloudinary, skipping database save")
+            
             # Create result record
             result = {
                 'original_file': filename,
@@ -297,6 +427,7 @@ class ViolationImageProcessor:
                 'confidence': confidence,
                 'plate_text': plate_text,
                 'normalized_plate': normalized_plate,
+                'ocr_source': 'raw_image',  # Indicates OCR was performed on raw image
                 'timestamp': time.time(),
                 'processed_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }

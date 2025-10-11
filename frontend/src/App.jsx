@@ -8,62 +8,145 @@ import {
   Camera,
   Wifi,
   WifiOff,
-  AlertCircle
+  AlertCircle,
+  Upload,
+  Pause,
+  RotateCcw,
+  BarChart3,
+  Activity,
+  Shield,
+  Users,
+  Clock,
+  Zap,
+  Database,
+  Search,
+  Filter,
+  Download,
+  Trash2,
+  CheckCircle,
+  XCircle,
+  Calendar,
+  MapPin,
+  Car,
+  Image as ImageIcon,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import axios from 'axios';
 
 const API_BASE_URL = 'http://localhost:5000';
+const VIOLATIONS_API_URL = 'http://localhost:5001';
+
+// Loading Spinner Component
+const LoadingSpinner = ({ size = 20, color = '#4ecdc4' }) => (
+  <div className="loading-spinner" style={{ width: size, height: size, borderColor: color }}>
+    <div></div>
+    <div></div>
+    <div></div>
+    <div></div>
+  </div>
+);
+
+// Loading Overlay Component
+const LoadingOverlay = ({ message = 'Loading...' }) => (
+  <div className="loading-overlay">
+    <div className="loading-content">
+      <LoadingSpinner size={40} />
+      <p>{message}</p>
+    </div>
+  </div>
+);
+
+// Stats Card Component
+const StatsCard = ({ icon: Icon, title, value, subtitle, color = '#4ecdc4', loading = false }) => (
+  <div className="stats-card" style={{ '--accent-color': color }}>
+    <div className="stats-icon">
+      {loading ? <LoadingSpinner size={24} color={color} /> : <Icon size={24} />}
+    </div>
+    <div className="stats-content">
+      <h3>{title}</h3>
+      <div className="stats-value">{value}</div>
+      {subtitle && <div className="stats-subtitle">{subtitle}</div>}
+    </div>
+  </div>
+);
 
 function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [detectionEnabled, setDetectionEnabled] = useState(true);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.4);
-  const [detectionMode, setDetectionMode] = useState('vehicle');
-  const [vehicleClasses, setVehicleClasses] = useState([0]);
-  const [cameraIndex, setCameraIndex] = useState(0);
   const [serverStatus, setServerStatus] = useState('offline');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [modelsLoaded, setModelsLoaded] = useState({});
   
   // Video file controls
-  const [sourceType, setSourceType] = useState('camera'); // 'camera' or 'video'
+  const [sourceType, setSourceType] = useState('camera');
   const [videoFile, setVideoFile] = useState(null);
   const [videoInfo, setVideoInfo] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
   
-  // Device information
-  const [deviceInfo, setDeviceInfo] = useState(null);
-  
-  // Crop information
-  const [cropInfo, setCropInfo] = useState(null);
-  
-  // Gemini analysis state
-  const [geminiInfo, setGeminiInfo] = useState(null);
-  const [geminiResults, setGeminiResults] = useState([]);
-  const [selectedAnalysis, setSelectedAnalysis] = useState(null);
+  // Real-time stats
+  const [stats, setStats] = useState({
+    totalVehicles: 0,
+    totalViolations: 0,
+    totalCrops: 0,
+    currentFPS: 0,
+    uptime: 0,
+    memoryUsage: 0
+  });
   
   // Helmet detection state
   const [helmetInfo, setHelmetInfo] = useState(null);
-  const [helmetResults, setHelmetResults] = useState([]);
-  
-  // Violation state
-  const [violationInfo, setViolationInfo] = useState(null);
   const [violations, setViolations] = useState([]);
+  const [violationImages, setViolationImages] = useState([]);
+  
+  // Database violations state
+  const [dbViolations, setDbViolations] = useState([]);
+  const [violationsLoading, setViolationsLoading] = useState(false);
+  const [violationsPagination, setViolationsPagination] = useState({
+    page: 1,
+    pages: 1,
+    per_page: 20,
+    total: 0,
+    has_next: false,
+    has_prev: false
+  });
+  const [violationsFilter, setViolationsFilter] = useState({
+    status: '',
+    number_plate: '',
+    search: ''
+  });
+  const [violationsStats, setViolationsStats] = useState({
+    total_violations: 0,
+    active_violations: 0,
+    resolved_violations: 0,
+    dismissed_violations: 0,
+    recent_violations_24h: 0,
+    violations_by_type: {}
+  });
+  const [showViolationsSection, setShowViolationsSection] = useState(false);
   
   const videoRef = useRef(null);
   const helmetVideoRef = useRef(null);
   const statusCheckInterval = useRef(null);
+  const statsInterval = useRef(null);
+  const imagesInterval = useRef(null);
 
   // Check server status periodically
   useEffect(() => {
     checkServerStatus();
     statusCheckInterval.current = setInterval(checkServerStatus, 5000);
+    statsInterval.current = setInterval(updateStats, 2000);
+    imagesInterval.current = setInterval(fetchViolationImages, 10000); // Refresh images every 10 seconds
+    
+    // Fetch violation images on component mount
+    fetchViolationImages();
     
     return () => {
-      if (statusCheckInterval.current) {
-        clearInterval(statusCheckInterval.current);
-      }
+      if (statusCheckInterval.current) clearInterval(statusCheckInterval.current);
+      if (statsInterval.current) clearInterval(statsInterval.current);
+      if (imagesInterval.current) clearInterval(imagesInterval.current);
     };
   }, []);
 
@@ -74,23 +157,74 @@ function App() {
       setIsStreaming(response.data.is_streaming);
       setDetectionEnabled(response.data.detection_enabled);
       setConfidenceThreshold(response.data.confidence_threshold);
-      setDetectionMode(response.data.detection_mode);
-      setVehicleClasses(response.data.vehicle_classes);
-      setModelsLoaded(response.data.models_loaded);
       setVideoInfo(response.data.video_info);
-      setDeviceInfo(response.data.device_info);
-      setCropInfo(response.data.crop_info);
-      setGeminiInfo(response.data.gemini_info);
       setHelmetInfo(response.data.helmet_detection);
-      setViolationInfo(response.data.violations);
-      if (response.data.video_info) {
-        setIsPaused(response.data.video_info.is_paused);
-        setSourceType(response.data.video_info.source_type);
-      }
       setError('');
     } catch (err) {
       setServerStatus('offline');
       setError('Cannot connect to server. Make sure the backend is running on port 5000.');
+    }
+  };
+
+  const updateStats = async () => {
+    try {
+      const [statusRes, cropsRes] = await Promise.all([
+        axios.get(`${API_BASE_URL}/status`),
+        axios.get(`${API_BASE_URL}/crop_info`)
+      ]);
+      
+      const status = statusRes.data;
+      const crops = cropsRes.data;
+      
+      // Try to get violations from the violations API, but don't fail if it's not available
+      let violationsCount = 0;
+      try {
+        const violationsRes = await axios.get(`${VIOLATIONS_API_URL}/api/violations/stats`, { timeout: 2000 });
+        if (violationsRes.data.success) {
+          violationsCount = violationsRes.data.stats.total_violations || 0;
+        }
+      } catch (err) {
+        // Violations API not available, use 0
+        console.log('Violations API not available, using 0 for violations count');
+      }
+      
+      setStats({
+        totalVehicles: crops.total_files || 0,
+        totalViolations: violationsCount,
+        totalCrops: crops.total_files || 0,
+        currentFPS: status.video_info?.fps || 0,
+        uptime: Date.now() - (status.video_info?.timestamp || Date.now()),
+        memoryUsage: status.device_info?.gpu_memory_allocated || 0
+      });
+      
+      // Note: Violation images are now handled by the violations API
+      // The main backend no longer provides violation data
+    } catch (err) {
+      // Silently fail for stats updates
+    }
+  };
+
+  const fetchViolationImages = async () => {
+    console.log('🖼️ Fetching violation images...');
+    try {
+      // Try to get violations from the violations API
+      const response = await axios.get(`${VIOLATIONS_API_URL}/api/violations?per_page=50`, { timeout: 2000 });
+      console.log('📡 Violations API response:', response.data);
+      
+      if (response.data.success) {
+        // Convert violations to image objects for backward compatibility
+        const images = response.data.violations.map(violation => ({
+          filename: violation.crop_filename || 'unknown',
+          created: new Date(violation.violation_timestamp).getTime() / 1000,
+          image_url: violation.image_url,
+          number_plate: violation.number_plate
+        }));
+        console.log('🖼️ Processed images:', images);
+        setViolationImages(images);
+      }
+    } catch (err) {
+      // Silently fail for violation images
+      console.log('❌ Violations API not available for images:', err.message);
     }
   };
 
@@ -101,7 +235,7 @@ function App() {
     try {
       const payload = {
         source_type: sourceType,
-        source: sourceType === 'camera' ? cameraIndex : videoFile
+        source: sourceType === 'camera' ? 0 : videoFile
       };
       
       const response = await axios.post(`${API_BASE_URL}/start_stream`, payload);
@@ -112,9 +246,6 @@ function App() {
         // Force refresh the video streams
         if (videoRef.current) {
           videoRef.current.src = `${API_BASE_URL}/video_feed?t=${Date.now()}`;
-        }
-        if (helmetVideoRef.current) {
-          helmetVideoRef.current.src = `${API_BASE_URL}/helmet_feed?t=${Date.now()}`;
         }
       } else {
         setError(response.data.message || 'Failed to start stream');
@@ -137,9 +268,6 @@ function App() {
         setIsStreaming(false);
         if (videoRef.current) {
           videoRef.current.src = '';
-        }
-        if (helmetVideoRef.current) {
-          helmetVideoRef.current.src = '';
         }
       } else {
         setError(response.data.message || 'Failed to stop stream');
@@ -170,61 +298,6 @@ function App() {
     }
   };
 
-  const updateConfidence = async (threshold) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/set_confidence`, {
-        threshold: threshold
-      });
-      
-      if (response.data.success) {
-        setConfidenceThreshold(threshold);
-      } else {
-        setError(response.data.message || 'Failed to update confidence');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to update confidence');
-    }
-  };
-
-  const updateDetectionMode = async (mode) => {
-    setLoading(true);
-    setError('');
-    
-    try {
-      const response = await axios.post(`${API_BASE_URL}/set_detection_mode`, {
-        mode: mode
-      });
-      
-      if (response.data.success) {
-        setDetectionMode(mode);
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to update detection mode');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to update detection mode');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateVehicleClasses = async (classes) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/set_vehicle_classes`, {
-        classes: classes
-      });
-      
-      if (response.data.success) {
-        setVehicleClasses(classes);
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to update vehicle classes');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to update vehicle classes');
-    }
-  };
-
   const handleFileUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -240,6 +313,7 @@ function App() {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        timeout: 600000, // 10 minutes timeout for very large files
       });
 
       if (response.data.success) {
@@ -250,7 +324,11 @@ function App() {
         setError(response.data.message || 'Failed to upload video');
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to upload video');
+      if (err.code === 'ECONNABORTED') {
+        setError('Upload timeout. The file is very large or the connection is slow. Please try again or check your internet connection.');
+      } else {
+        setError(err.response?.data?.message || 'Failed to upload video');
+      }
     } finally {
       setLoading(false);
     }
@@ -261,8 +339,6 @@ function App() {
       const response = await axios.post(`${API_BASE_URL}/pause_video`);
       if (response.data.success) {
         setIsPaused(true);
-      } else {
-        setError(response.data.message || 'Failed to pause video');
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to pause video');
@@ -274,8 +350,6 @@ function App() {
       const response = await axios.post(`${API_BASE_URL}/resume_video`);
       if (response.data.success) {
         setIsPaused(false);
-      } else {
-        setError(response.data.message || 'Failed to resume video');
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to resume video');
@@ -287,844 +361,698 @@ function App() {
       const response = await axios.post(`${API_BASE_URL}/seek_video`, {
         frame: frameNumber
       });
-      if (response.data.success) {
-        // Update video info will be handled by status check
-      } else {
-        setError(response.data.message || 'Failed to seek video');
-      }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to seek video');
     }
   };
 
-  const switchDevice = async (device) => {
-    setLoading(true);
-    setError('');
-    
+  const updateConfidence = async (threshold) => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/switch_device`, {
-        device: device
+      const response = await axios.post(`${API_BASE_URL}/set_confidence`, {
+        threshold: threshold
       });
       
       if (response.data.success) {
-        setDeviceInfo(response.data.device_info);
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to switch device');
+        setConfidenceThreshold(threshold);
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to switch device');
-    } finally {
-      setLoading(false);
+      setError(err.response?.data?.message || 'Failed to update confidence');
     }
   };
 
-  const setSaveInterval = async (interval) => {
+  // Database violations functions
+  const fetchDbViolations = async (page = 1, filters = {}) => {
+    setViolationsLoading(true);
     try {
-      const response = await axios.post(`${API_BASE_URL}/set_save_interval`, {
-        interval: interval
+      const params = new URLSearchParams({
+        page: page.toString(),
+        per_page: violationsPagination.per_page.toString(),
+        ...filters
       });
       
-      if (response.data.success) {
-        setCropInfo(prev => ({ ...prev, save_interval: interval }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to set save interval');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to set save interval');
-    }
-  };
-
-  const clearCrops = async () => {
-    setLoading(true);
-    setError('');
-    
-    try {
-      const response = await axios.post(`${API_BASE_URL}/clear_crops`);
+      const response = await axios.get(`${VIOLATIONS_API_URL}/api/violations?${params}`);
       
       if (response.data.success) {
-        setCropInfo(prev => ({ ...prev, total_crops: 0 }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to clear crops');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to clear crops');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const setMinCropSize = async (width, height) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/set_min_crop_size`, {
-        min_width: width,
-        min_height: height
-      });
-      
-      if (response.data.success) {
-        setCropInfo(prev => ({ 
-          ...prev, 
-          min_crop_width: width,
-          min_crop_height: height 
-        }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to set minimum crop size');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to set minimum crop size');
-    }
-  };
-
-  // Gemini analysis functions
-  const toggleGeminiAnalysis = async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/toggle_gemini_analysis`);
-      
-      if (response.data.success) {
-        setGeminiInfo(prev => ({
-          ...prev,
-          analysis_enabled: response.data.gemini_analysis_enabled
-        }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to toggle Gemini analysis');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to toggle Gemini analysis');
-    }
-  };
-
-  const fetchGeminiResults = async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/gemini_results?limit=20`);
-      
-      if (response.data.success) {
-        setGeminiResults(response.data.results);
-        setGeminiInfo(prev => ({
-          ...prev,
-          total_analyses: response.data.total_analyses
-        }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to fetch Gemini results');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to fetch Gemini results');
-    }
-  };
-
-  const analyzeImage = async (filename) => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/analyze_image`, {
-        filename: filename
-      });
-      
-      if (response.data.success) {
-        setSelectedAnalysis(response.data.analysis);
-        // Refresh results
-        fetchGeminiResults();
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to analyze image');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to analyze image');
-    }
-  };
-
-  // Helmet detection functions
-  const toggleHelmetDetection = async () => {
-    try {
-      const response = await axios.post(`${API_BASE_URL}/toggle_helmet_detection`);
-      
-      if (response.data.success) {
-        setHelmetInfo(prev => ({
-          ...prev,
-          enabled: response.data.helmet_detection_enabled
-        }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to toggle helmet detection');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to toggle helmet detection');
-    }
-  };
-
-  const fetchHelmetResults = async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/helmet_results?limit=20`);
-      
-      if (response.data.success) {
-        setHelmetResults(response.data.results);
-        setHelmetInfo(prev => ({
-          ...prev,
-          total_results: response.data.total_results
-        }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to fetch helmet results');
-      }
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to fetch helmet results');
-    }
-  };
-
-  // Violation functions
-  const fetchViolations = async () => {
-    try {
-      const response = await axios.get(`${API_BASE_URL}/violations?limit=50`);
-      
-      if (response.data.success) {
-        setViolations(response.data.violations);
-        setViolationInfo(prev => ({
-          ...prev,
-          total_violations: response.data.total_violations
-        }));
-        setError('');
+        setDbViolations(response.data.violations);
+        setViolationsPagination(response.data.pagination);
       } else {
         setError(response.data.message || 'Failed to fetch violations');
       }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to fetch violations');
+    } finally {
+      setViolationsLoading(false);
     }
   };
 
-  const clearViolations = async () => {
-    setLoading(true);
-    setError('');
-    
+  const fetchViolationsStats = async () => {
     try {
-      const response = await axios.post(`${API_BASE_URL}/clear_violations`);
-      
+      const response = await axios.get(`${VIOLATIONS_API_URL}/api/violations/stats`);
       if (response.data.success) {
-        setViolations([]);
-        setViolationInfo(prev => ({ ...prev, total_violations: 0 }));
-        setError('');
-      } else {
-        setError(response.data.message || 'Failed to clear violations');
+        setViolationsStats(response.data.stats);
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to clear violations');
-    } finally {
-      setLoading(false);
+      console.error('Failed to fetch violations stats:', err);
     }
+  };
+
+  const updateViolationStatus = async (numberPlate, status) => {
+    try {
+      const response = await axios.put(`${VIOLATIONS_API_URL}/api/violations/${numberPlate}`, {
+        status: status
+      });
+      
+      if (response.data.success) {
+        // Refresh violations list
+        fetchDbViolations(violationsPagination.page, violationsFilter);
+        fetchViolationsStats();
+        setError('');
+      } else {
+        setError(response.data.message || 'Failed to update violation status');
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to update violation status');
+    }
+  };
+
+  const deleteViolation = async (numberPlate) => {
+    if (!window.confirm('Are you sure you want to delete this violation? This action cannot be undone.')) {
+      return;
+    }
+    
+    try {
+      const response = await axios.delete(`${VIOLATIONS_API_URL}/api/violations/${numberPlate}`);
+      
+      if (response.data.success) {
+        // Refresh violations list
+        fetchDbViolations(violationsPagination.page, violationsFilter);
+        fetchViolationsStats();
+        setError('');
+      } else {
+        setError(response.data.message || 'Failed to delete violation');
+      }
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to delete violation');
+    }
+  };
+
+  const exportViolations = async () => {
+    try {
+      const response = await axios.get(`${VIOLATIONS_API_URL}/api/violations/export`, {
+        responseType: 'blob'
+      });
+      
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'violations_export.csv');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to export violations');
+    }
+  };
+
+  const handleFilterChange = (key, value) => {
+    const newFilter = { ...violationsFilter, [key]: value };
+    setViolationsFilter(newFilter);
+    fetchDbViolations(1, newFilter);
+  };
+
+  const handlePageChange = (newPage) => {
+    fetchDbViolations(newPage, violationsFilter);
   };
 
   return (
     <div className="app">
+      {/* Header Section */}
       <header className="header">
         <h1>🎥 Safehead - Vehicle & Helmet Detection</h1>
         <p>Real-time vehicle detection with automatic helmet analysis pipeline</p>
+        
+        {/* Status Indicator */}
+        <div className="status-indicator">
+          <div className={`status-dot ${serverStatus}`}></div>
+          <span className="status-text">
+            {serverStatus === 'online' ? (
+              <>
+                <Wifi size={16} style={{ marginRight: '0.5rem' }} />
+                Server Online
+              </>
+            ) : (
+              <>
+                <WifiOff size={16} style={{ marginRight: '0.5rem' }} />
+                Server Offline
+              </>
+            )}
+          </span>
+        </div>
       </header>
 
+      {/* Error Display */}
       {error && (
-        <div style={{ 
-          background: 'rgba(255, 107, 107, 0.2)', 
-          border: '1px solid rgba(255, 107, 107, 0.5)',
-          borderRadius: '8px',
-          padding: '1rem',
-          marginBottom: '1rem',
-          color: '#ff6b6b',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem'
-        }}>
+        <div className="error-message">
           <AlertCircle size={20} />
           {error}
         </div>
       )}
 
-      <div className="dashboard" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <div className="video-section" style={{ width: '100%', marginBottom: '1rem' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', height: '50vh' }}>
-            {/* Vehicle Detection Stream */}
-            <div className="video-container" style={{ width: '100%', height: '100%', overflow: 'hidden', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <div style={{ padding: '0.5rem', background: 'rgba(0,0,0,0.3)', color: 'white', fontSize: '0.9rem', fontWeight: 'bold' }}>
-                🚗 Vehicle Detection Stream
-              </div>
-              {isStreaming ? (
-                <img
-                  ref={videoRef}
-                  src={`${API_BASE_URL}/video_feed`}
-                  alt="Vehicle Detection Stream"
-                  className="video-stream"
-                  style={{ width: '100%', height: 'calc(100% - 40px)', objectFit: 'contain', display: 'block', background: 'black' }}
-                  onError={() => setError('Vehicle stream error. Check camera connection.')}
-                />
-              ) : (
-                <div className="video-placeholder" style={{ height: 'calc(100% - 40px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                  <Camera size={48} style={{ opacity: 0.5, marginBottom: '1rem' }} />
-                  <div>Vehicle stream not active</div>
-                  <div style={{ fontSize: '0.9rem', opacity: 0.7, marginTop: '0.5rem' }}>
-                    Click "Start Stream" to begin
-                  </div>
-                </div>
-              )}
+      {/* Main Video Stream Section */}
+      <div className="main-stream-section">
+        <div className="stream-header">
+          <h2>🚗 Main Detection Stream</h2>
+          <div className="stream-controls">
+            <div className="source-selector">
+              <button
+                className={`btn ${sourceType === 'camera' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setSourceType('camera')}
+                disabled={isStreaming || loading}
+              >
+                <Camera size={16} />
+                Camera
+              </button>
+              <button
+                className={`btn ${sourceType === 'video' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setSourceType('video')}
+                disabled={isStreaming || loading}
+              >
+                <Upload size={16} />
+                Upload Video
+              </button>
             </div>
-
-            {/* Helmet Detection Stream */}
-            <div className="video-container" style={{ width: '100%', height: '100%', overflow: 'hidden', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <div style={{ padding: '0.5rem', background: 'rgba(0,0,0,0.3)', color: 'white', fontSize: '0.9rem', fontWeight: 'bold' }}>
-                🪖 Helmet Detection Results
-              </div>
-              {isStreaming ? (
-                <img
-                  ref={helmetVideoRef}
-                  src={`${API_BASE_URL}/helmet_feed`}
-                  alt="Helmet Detection Stream"
-                  className="video-stream"
-                  style={{ width: '100%', height: 'calc(100% - 40px)', objectFit: 'contain', display: 'block', background: 'black' }}
-                  onError={() => setError('Helmet stream error.')}
+            
+            {sourceType === 'video' && (
+              <div className="file-upload">
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={handleFileUpload}
+                  disabled={loading || isStreaming}
+                  id="video-upload"
                 />
-              ) : (
-                <div className="video-placeholder" style={{ height: 'calc(100% - 40px)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                  <Camera size={48} style={{ opacity: 0.5, marginBottom: '1rem' }} />
-                  <div>Helmet stream not active</div>
-                  <div style={{ fontSize: '0.9rem', opacity: 0.7, marginTop: '0.5rem' }}>
-                    Start vehicle stream first
+                <label htmlFor="video-upload" className="upload-label">
+                  {loading ? <LoadingSpinner size={16} /> : <Upload size={16} />}
+                  {videoFile ? 'Change Video' : 'Select Video File'}
+                </label>
+                {videoFile && (
+                  <div className="file-info">
+                    <div className="file-name">{videoFile.split('/').pop()}</div>
+                    <div className="file-size">
+                      {(() => {
+                        const fileInput = document.getElementById('video-upload');
+                        if (fileInput && fileInput.files[0]) {
+                          const size = fileInput.files[0].size;
+                          return `${(size / 1024 / 1024).toFixed(1)}MB`;
+                        }
+                        return '';
+                      })()}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
+            )}
+            
+            <div className="stream-buttons">
+              <button
+                className="btn btn-primary"
+                onClick={startStream}
+                disabled={loading || isStreaming || serverStatus === 'offline' || (sourceType === 'video' && !videoFile)}
+              >
+                {loading ? <LoadingSpinner size={16} /> : <Play size={16} />}
+                Start Stream
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={stopStream}
+                disabled={loading || !isStreaming || serverStatus === 'offline'}
+              >
+                <Square size={16} />
+                Stop Stream
+              </button>
             </div>
           </div>
         </div>
 
-        <div className="controls-section" style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div className="status-indicator">
-              <div className={`status-dot ${serverStatus}`}></div>
-              <span className="status-text">
-                {serverStatus === 'online' ? (
-                  <>
-                    <Wifi size={16} style={{ marginRight: '0.5rem' }} />
-                    Server Online
-                  </>
-                ) : (
-                  <>
-                    <WifiOff size={16} style={{ marginRight: '0.5rem' }} />
-                    Server Offline
-                  </>
-                )}
-              </span>
+        <div className="video-container">
+          {isStreaming ? (
+            <img
+              ref={videoRef}
+              src={`${API_BASE_URL}/video_feed`}
+              alt="Main Detection Stream"
+              className="video-stream"
+              onError={() => setError('Video stream error. Check camera connection.')}
+            />
+          ) : (
+            <div className="video-placeholder">
+              <Camera size={64} />
+              <h3>Stream Not Active</h3>
+              <p>Click "Start Stream" to begin detection</p>
             </div>
-
-            <div className="control-group">
-              <h3>Source Selection</h3>
-              <div className="button-group">
-                <button
-                  className={`btn ${sourceType === 'camera' ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setSourceType('camera')}
-                  disabled={isStreaming}
-                >
-                  📹 Camera
-                </button>
-                <button
-                  className={`btn ${sourceType === 'video' ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setSourceType('video')}
-                  disabled={isStreaming}
-                >
-                  🎬 Video File
-                </button>
-              </div>
-              {sourceType === 'video' && (
-                <div className="input-group" style={{ marginTop: '1rem' }}>
-                  <label>Upload Video File</label>
-                  <input
-                    type="file"
-                    accept="video/*"
-                    onChange={handleFileUpload}
-                    disabled={loading || isStreaming}
-                    style={{ 
-                      padding: '0.5rem',
-                      border: '1px solid rgba(255, 255, 255, 0.3)',
-                      borderRadius: '8px',
-                      background: 'rgba(255, 255, 255, 0.1)',
-                      color: 'white'
-                    }}
-                  />
-                  {videoFile && (
-                    <div style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.7)', marginTop: '0.5rem' }}>
-                      Selected: {videoFile.split('/').pop()}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="control-group">
-              <h3>Stream Controls</h3>
-              <div className="button-group">
-                <button
-                  className="btn btn-primary"
-                  onClick={startStream}
-                  disabled={loading || isStreaming || serverStatus === 'offline' || (sourceType === 'video' && !videoFile)}
-                >
-                  <Play size={16} />
-                  Start Stream
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={stopStream}
-                  disabled={loading || !isStreaming || serverStatus === 'offline'}
-                >
-                  <Square size={16} />
-                  Stop Stream
-                </button>
-              </div>
-            </div>
-
-            {sourceType === 'video' && isStreaming && videoInfo && (
-              <div className="control-group">
-                <h3>Video Controls</h3>
-                <div className="button-group">
-                  <button
-                    className="btn btn-toggle"
-                    onClick={isPaused ? resumeVideo : pauseVideo}
-                    disabled={loading || serverStatus === 'offline'}
-                  >
-                    {isPaused ? <Play size={16} /> : <Square size={16} />}
-                    {isPaused ? 'Resume' : 'Pause'}
-                  </button>
-                </div>
-                <div className="slider-group" style={{ marginTop: '1rem' }}>
-                  <label>Frame: {videoInfo.current_frame || 0} / {videoInfo.total_frames || 0}</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max={videoInfo.total_frames || 0}
-                    value={videoInfo.current_frame || 0}
-                    onChange={(e) => seekVideo(parseInt(e.target.value))}
-                    className="slider"
-                    disabled={serverStatus === 'offline'}
-                  />
-                </div>
-                <div style={{ fontSize: '0.8rem', color: 'rgba(255, 255, 255, 0.7)', marginTop: '0.5rem' }}>
-                  Duration: {Math.round(videoInfo.duration_seconds || 0)}s | FPS: {(videoInfo.fps || 0).toFixed(1)}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div className="control-group">
-              <h3>Detection Settings</h3>
-              <div className="button-group">
-                <button
-                  className="btn btn-toggle"
-                  onClick={toggleDetection}
-                  disabled={loading || serverStatus === 'offline'}
-                >
-                  {detectionEnabled ? <Eye size={16} /> : <EyeOff size={16} />}
-                  {detectionEnabled ? 'Disable Detection' : 'Enable Detection'}
-                </button>
-              </div>
-            </div>
-
-            <div className="control-group">
-              <h3>🪖 Helmet Detection Pipeline</h3>
-              {helmetInfo && (
-                <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)', marginBottom: '1rem' }}>
-                  <div>Status: {helmetInfo.enabled ? '🟢 Active' : '🔴 Disabled'}</div>
-                  <div>Total Results: {helmetInfo.total_results || 0}</div>
-                  <div>Analysis Interval: {helmetInfo.analysis_interval || 0.5}s</div>
-                  <div>Results Directory: {helmetInfo.results_directory || 'helmet_results/'}</div>
-                </div>
-              )}
-              <div className="button-group">
-                <button
-                  className={`btn ${helmetInfo?.enabled ? 'btn-secondary' : 'btn-primary'}`}
-                  onClick={toggleHelmetDetection}
-                  disabled={loading || serverStatus === 'offline'}
-                >
-                  {helmetInfo?.enabled ? '⏸️ Disable Helmet Detection' : '▶️ Enable Helmet Detection'}
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={fetchHelmetResults}
-                  disabled={loading || serverStatus === 'offline'}
-                >
-                  🔄 Refresh Helmet Results
-                </button>
-              </div>
-              {helmetResults.length > 0 && (
-                <div style={{ marginTop: '1rem' }}>
-                  <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Recent Helmet Detection Results ({helmetResults.length})</h4>
-                  <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '0.5rem', backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                    {helmetResults.map((result, index) => (
-                      <div
-                        key={index}
-                        style={{ padding: '0.5rem', borderBottom: index < helmetResults.length - 1 ? '1px solid rgba(255, 255, 255, 0.1)' : 'none' }}
-                      >
-                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '0.25rem' }}>
-                          Vehicle ID: {result.vehicle_id || 'Unknown'} - {result.crop_file}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.8)' }}>
-                          Detections: {result.detections?.length || 0}
-                          {result.detections?.map((det, i) => (
-                            <span key={i} style={{ marginLeft: '0.5rem', color: det.class?.toLowerCase().includes('no_helmet') ? '#ff6b6b' : '#4ecdc4' }}>
-                              {det.class}: {det.confidence?.toFixed(2)}
-                            </span>
-                          ))}
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'rgba(255, 255, 255, 0.5)', marginTop: '0.25rem' }}>
-                          {new Date(result.timestamp * 1000).toLocaleString()}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="control-group">
-              <h3>🚨 Helmet Violations</h3>
-              {violationInfo && (
-                <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)', marginBottom: '1rem' }}>
-                  <div>Total Violations: <span style={{ color: '#ff6b6b', fontWeight: 'bold' }}>{violationInfo.total_violations || 0}</span></div>
-                  <div>Directory: {violationInfo.violation_directory || 'violation/'}</div>
-                </div>
-              )}
-              <div className="button-group">
-                <button
-                  className="btn btn-secondary"
-                  onClick={fetchViolations}
-                  disabled={loading || serverStatus === 'offline'}
-                >
-                  🔄 Refresh Violations
-                </button>
-                <button
-                  className="btn btn-secondary"
-                  onClick={clearViolations}
-                  disabled={loading || serverStatus === 'offline' || !violationInfo?.total_violations}
-                >
-                  🗑️ Clear All Violations
-                </button>
-              </div>
-              {violations.length > 0 && (
-                <div style={{ marginTop: '1rem' }}>
-                  <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Recent Violations ({violations.length})</h4>
-                  <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid rgba(255, 107, 107, 0.3)', borderRadius: '0.5rem', backgroundColor: 'rgba(255, 107, 107, 0.1)' }}>
-                    {violations.map((violation, index) => (
-                      <div
-                        key={index}
-                        style={{ padding: '0.5rem', borderBottom: index < violations.length - 1 ? '1px solid rgba(255, 107, 107, 0.2)' : 'none' }}
-                      >
-                        <div style={{ fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '0.25rem', color: '#ff6b6b' }}>
-                          🚨 Vehicle ID: {violation.vehicle_id || 'Unknown'}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.8)' }}>
-                          Violations: {violation.detections?.length || 0}
-                          {violation.detections?.map((det, i) => (
-                            <span key={i} style={{ marginLeft: '0.5rem', color: '#ff6b6b' }}>
-                              {det.class}: {det.confidence?.toFixed(2)}
-                            </span>
-                          ))}
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'rgba(255, 255, 255, 0.5)', marginTop: '0.25rem' }}>
-                          {new Date(violation.timestamp * 1000).toLocaleString()}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="control-group">
-              <h3>Configuration</h3>
-              <div className="slider-group">
-                <label>Confidence Threshold: {confidenceThreshold.toFixed(2)}</label>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={confidenceThreshold}
-                  onChange={(e) => updateConfidence(parseFloat(e.target.value))}
-                  className="slider"
-                  disabled={serverStatus === 'offline'}
-                />
-              </div>
-              <div className="input-group">
-                <label>Camera Index</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="10"
-                  value={cameraIndex}
-                  onChange={(e) => setCameraIndex(parseInt(e.target.value))}
-                  placeholder="0"
-                  disabled={isStreaming || serverStatus === 'offline'}
-                />
-              </div>
-              <div className="input-group">
-                <label>Vehicle Classes (comma separated)</label>
-                <input
-                  type="text"
-                  value={vehicleClasses.join(', ')}
-                  onChange={(e) => {
-                    const classes = e.target.value.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c));
-                    setVehicleClasses(classes);
-                  }}
-                  onBlur={() => updateVehicleClasses(vehicleClasses)}
-                  placeholder="0"
-                  disabled={serverStatus === 'offline'}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <div className="control-group">
-              <h3>Device & Performance</h3>
-              {deviceInfo && (
-                <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)', marginBottom: '1rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    {deviceInfo.device === 'cpu' ? '🖥️' : '🎮'} 
-                    <strong>Device: {deviceInfo.device.toUpperCase()}</strong>
-                  </div>
-                  {deviceInfo.cuda_available && deviceInfo.device !== 'cpu' && (
-                    <>
-                      <div>GPU: {deviceInfo.gpu_name}</div>
-                      <div>Memory: {deviceInfo.gpu_memory_allocated?.toFixed(1)}GB / {deviceInfo.gpu_memory_total?.toFixed(1)}GB</div>
-                      <div>Cached: {deviceInfo.gpu_memory_cached?.toFixed(1)}GB</div>
-                    </>
-                  )}
-                  {deviceInfo.cuda_available && deviceInfo.device_count > 0 && (
-                    <div>Available GPUs: {deviceInfo.device_count}</div>
-                  )}
-                </div>
-              )}
-              <div className="button-group">
-                {deviceInfo?.cuda_available ? (
-                  <>
-                    <button
-                      className={`btn ${deviceInfo?.device === 'cuda:0' ? 'btn-primary' : 'btn-secondary'}`}
-                      onClick={() => switchDevice('cuda:0')}
-                      disabled={loading || serverStatus === 'offline'}
-                    >
-                      🎮 Use GPU
-                    </button>
-                    <button
-                      className={`btn ${deviceInfo?.device === 'cpu' ? 'btn-primary' : 'btn-secondary'}`}
-                      onClick={() => switchDevice('cpu')}
-                      disabled={loading || serverStatus === 'offline'}
-                    >
-                      🖥️ Use CPU
-                    </button>
-                  </>
-                ) : (
-                  <div style={{ 
-                    padding: '0.75rem', 
-                    background: 'rgba(255, 107, 107, 0.2)', 
-                    borderRadius: '8px',
-                    color: '#ff6b6b',
-                    fontSize: '0.85rem'
-                  }}>
-                    ⚠️ GPU not available - using CPU only
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="control-group">
-              <h3>Auto-Save Vehicle Crops</h3>
-              {cropInfo && (
-                <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)', marginBottom: '1rem' }}>
-                  <div>📁 Directory: cropped_images/</div>
-                  <div>💾 Total Saved: {cropInfo.total_crops} images</div>
-                  <div>⏱️ Save Interval: {cropInfo.save_interval}s</div>
-                  <div>📏 Min Size: {cropInfo.min_crop_width}x{cropInfo.min_crop_height}px</div>
-                  {cropInfo.last_save_time > 0 && (
-                    <div>🕒 Last Save: {new Date(cropInfo.last_save_time * 1000).toLocaleTimeString()}</div>
-                  )}
-                </div>
-              )}
-              <div className="slider-group">
-                <label>Save Interval: {cropInfo?.save_interval || 2}s</label>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="10"
-                  step="0.5"
-                  value={cropInfo?.save_interval || 2}
-                  onChange={(e) => setSaveInterval(parseFloat(e.target.value))}
-                  className="slider"
-                  disabled={serverStatus === 'offline'}
-                />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '1rem' }}>
-                <div className="input-group" style={{ margin: 0 }}>
-                  <label style={{ fontSize: '0.8rem' }}>Min Width (px)</label>
-                  <input
-                    type="number"
-                    min="50"
-                    max="1000"
-                    value={cropInfo?.min_crop_width || 135}
-                    onChange={(e) => setMinCropSize(parseInt(e.target.value), cropInfo?.min_crop_height || 332)}
-                    disabled={serverStatus === 'offline'}
-                    style={{ padding: '0.5rem', fontSize: '0.85rem' }}
-                  />
-                </div>
-                <div className="input-group" style={{ margin: 0 }}>
-                  <label style={{ fontSize: '0.8rem' }}>Min Height (px)</label>
-                  <input
-                    type="number"
-                    min="50"
-                    max="1000"
-                    value={cropInfo?.min_crop_height || 332}
-                    onChange={(e) => setMinCropSize(cropInfo?.min_crop_width || 135, parseInt(e.target.value))}
-                    disabled={serverStatus === 'offline'}
-                    style={{ padding: '0.5rem', fontSize: '0.85rem' }}
-                  />
-                </div>
-              </div>
-              <div className="button-group" style={{ marginTop: '1rem' }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={clearCrops}
-                  disabled={loading || serverStatus === 'offline' || !cropInfo?.total_crops}
-                >
-                  🗑️ Clear All Crops
-                </button>
-              </div>
-              <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.6)', marginTop: '0.5rem', fontStyle: 'italic' }}>
-                Vehicle detections are automatically saved every {cropInfo?.save_interval || 2} seconds when streaming.
-                Only crops larger than {cropInfo?.min_crop_width || 135}x{cropInfo?.min_crop_height || 332}px are saved.
-              </div>
-            </div>
-
-            {geminiInfo && (
-              <div className="control-group">
-                <h3>🤖 Gemini AI Analysis</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '1rem', fontSize: '0.85rem' }}>
-                  <div>
-                    <strong>Status:</strong> {geminiInfo.enabled ? (geminiInfo.analysis_enabled ? '🟢 Active' : '🟡 Paused') : '🔴 Not Configured'}
-                  </div>
-                  <div>
-                    <strong>Total Analyses:</strong> {geminiInfo.total_analyses || 0}
-                  </div>
-                </div>
-                {geminiInfo.enabled ? (
-                  <>
-                    <div className="button-group">
-                      <button
-                        className={`btn ${geminiInfo.analysis_enabled ? 'btn-secondary' : 'btn-primary'}`}
-                        onClick={toggleGeminiAnalysis}
-                        disabled={loading || serverStatus === 'offline'}
-                      >
-                        {geminiInfo.analysis_enabled ? '⏸️ Pause Analysis' : '▶️ Resume Analysis'}
-                      </button>
-                      <button
-                        className="btn btn-secondary"
-                        onClick={fetchGeminiResults}
-                        disabled={loading || serverStatus === 'offline'}
-                      >
-                        🔄 Refresh Results
-                      </button>
-                    </div>
-                    {geminiResults.length > 0 && (
-                      <div style={{ marginTop: '1rem' }}>
-                        <h4 style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>Recent Analysis Results ({geminiResults.length})</h4>
-                        <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '0.5rem', backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
-                          {geminiResults.map((result, index) => (
-                            <div
-                              key={index}
-                              style={{ padding: '0.75rem', borderBottom: index < geminiResults.length - 1 ? '1px solid rgba(255, 255, 255, 0.1)' : 'none', cursor: 'pointer', transition: 'background-color 0.2s' }}
-                              onClick={() => setSelectedAnalysis(result.analysis)}
-                              onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(255, 255, 255, 0.05)'}
-                              onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
-                            >
-                              <div style={{ fontSize: '0.8rem', fontWeight: 'bold', marginBottom: '0.25rem' }}>{result.filename}</div>
-                              {result.analysis && result.analysis.vehicle_type && (
-                                <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.8)' }}>
-                                  🚗 {result.analysis.color || 'Unknown'} {result.analysis.brand || 'Unknown'} {result.analysis.vehicle_type}
-                                  {result.analysis.license_plate && result.analysis.license_plate !== 'not_visible' && (
-                                    <span> • 🔖 {result.analysis.license_plate}</span>
-                                  )}
-                                </div>
-                              )}
-                              {result.analysis && result.analysis.error && (
-                                <div style={{ fontSize: '0.75rem', color: '#ff6b6b' }}>❌ {result.analysis.error}</div>
-                              )}
-                              <div style={{ fontSize: '0.7rem', color: 'rgba(255, 255, 255, 0.5)', marginTop: '0.25rem' }}>
-                                {new Date(result.timestamp * 1000).toLocaleString()}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {selectedAnalysis && (
-                      <div style={{ marginTop: '1rem', padding: '1rem', border: '1px solid rgba(255, 255, 255, 0.2)', borderRadius: '0.5rem', backgroundColor: 'rgba(0, 0, 0, 0.3)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                          <h4 style={{ fontSize: '0.9rem', margin: 0 }}>Analysis Details</h4>
-                          <button className="btn btn-small" onClick={() => setSelectedAnalysis(null)} style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem' }}>✕ Close</button>
-                        </div>
-                        {selectedAnalysis.error ? (
-                          <div style={{ color: '#ff6b6b', fontSize: '0.85rem' }}>Error: {selectedAnalysis.error}</div>
-                        ) : (
-                          <div style={{ fontSize: '0.8rem' }}>
-                            {Object.entries(selectedAnalysis).filter(([key, value]) => !['analysis_timestamp', 'image_path', 'raw_response'].includes(key) && value).map(([key, value]) => (
-                              <div key={key} style={{ marginBottom: '0.5rem' }}>
-                                <strong style={{ textTransform: 'capitalize' }}>{key.replace('_', ' ')}:</strong> {Array.isArray(value) ? value.join(', ') : value.toString()}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div style={{ padding: '1rem', backgroundColor: 'rgba(255, 165, 0, 0.1)', border: '1px solid rgba(255, 165, 0, 0.3)', borderRadius: '0.5rem', fontSize: '0.85rem' }}>
-                    <div style={{ marginBottom: '0.5rem' }}>⚠️ Gemini AI not configured</div>
-                    <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.7)' }}>
-                      To enable vehicle analysis:
-                      <br />1. Get API key from Google AI Studio
-                      <br />2. Create .env file in backend/
-                      <br />3. Add: GEMINI_API_KEY=your_key
-                      <br />4. Restart the server
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="control-group">
-              <h3>Model Information</h3>
-              <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)' }}>
-                <div>🚗 Vehicle Model: {modelsLoaded.vehicle_model || 'best.pt'}</div>
-                <div>🪖 Helmet Model: {modelsLoaded.helmet_model || 'best-helmet-2.pt'}</div>
-              </div>
-            </div>
-
-            <div className="control-group">
-              <h3>Status</h3>
-              <div style={{ fontSize: '0.85rem', color: 'rgba(255, 255, 255, 0.8)' }}>
-                <div>Streaming: {isStreaming ? '✅ Active' : '❌ Inactive'}</div>
-                <div>Source: {sourceType === 'camera' ? `📹 Camera ${cameraIndex}` : '🎬 Video File'}</div>
-                <div>Detection: {detectionEnabled ? '✅ Enabled' : '❌ Disabled'}</div>
-                <div>Mode: Vehicle Detection Only</div>
-                <div>Confidence: {confidenceThreshold.toFixed(2)}</div>
-                <div>Vehicle Classes: [{vehicleClasses.join(', ')}]</div>
-                <div>Helmet Detection: {helmetInfo?.enabled ? '✅ Active' : '❌ Disabled'}</div>
-                <div>Helmet Results: {helmetInfo?.total_results || 0}</div>
-                <div>Violations: <span style={{ color: '#ff6b6b', fontWeight: 'bold' }}>{violationInfo?.total_violations || 0}</span></div>
-                {videoInfo && videoInfo.source_type === 'video' && (
-                  <>
-                    <div>Video: {isPaused ? '⏸️ Paused' : '▶️ Playing'}</div>
-                    <div>Progress: {Math.round((videoInfo.current_frame / videoInfo.total_frames) * 100)}%</div>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
+          )}
         </div>
       </div>
+
+      {/* Helmet Detection Stream Section */}
+      <div className="helmet-stream-section">
+        <div className="stream-header">
+          <h2>🪖 Helmet Violation Stream</h2>
+          <div className="helmet-stats">
+            <span className="stat-badge">
+              <Shield size={16} />
+              {stats.totalViolations} Violations
+            </span>
+            <span className="stat-badge">
+              <Activity size={16} />
+              {helmetInfo?.enabled ? 'Active' : 'Inactive'}
+            </span>
+          </div>
+        </div>
+
+        <div className="helmet-container">
+          {violationImages.length > 0 ? (
+            <div className="violation-gallery">
+              {violationImages.slice(0, 6).map((image, index) => {
+                console.log(`🖼️ Rendering image ${index}:`, image);
+                return (
+                  <div key={index} className="violation-item">
+                    <img
+                      src={image.image_url || `${API_BASE_URL}/violation/${image.filename}`}
+                      alt={`Violation ${index + 1}`}
+                      className="violation-image"
+                      onError={(e) => {
+                        console.log(`❌ Image failed to load:`, e.target.src);
+                        e.target.style.display = 'none';
+                      }}
+                      onLoad={() => console.log(`✅ Image loaded:`, image.image_url || image.filename)}
+                    />
+                    <div className="violation-info">
+                      <span className="violation-time">
+                        {new Date(image.created * 1000).toLocaleTimeString()}
+                      </span>
+                      {image.number_plate && (
+                        <span className="violation-plate">
+                          {image.number_plate}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="helmet-placeholder">
+              <Shield size={64} />
+              <h3>No Violations Detected</h3>
+              <p>Start the main stream to begin helmet detection</p>
+              <p style={{fontSize: '0.8rem', opacity: 0.7}}>
+                Images: {violationImages.length} | 
+                Check console for debug info
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Video Controls Section */}
+      {isStreaming && videoInfo && (
+        <div className="video-controls-section">
+          <h2>🎮 Video Controls</h2>
+          <div className="controls-grid">
+            <div className="control-group">
+              <button
+                className="btn btn-toggle"
+                onClick={isPaused ? resumeVideo : pauseVideo}
+                disabled={loading || serverStatus === 'offline'}
+              >
+                {isPaused ? <Play size={16} /> : <Pause size={16} />}
+                {isPaused ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+
+            <div className="control-group">
+              <button
+                className="btn btn-toggle"
+                onClick={toggleDetection}
+                disabled={loading || serverStatus === 'offline'}
+              >
+                {detectionEnabled ? <Eye size={16} /> : <EyeOff size={16} />}
+                {detectionEnabled ? 'Disable Detection' : 'Enable Detection'}
+              </button>
+            </div>
+
+            <div className="control-group">
+              <label>Confidence: {confidenceThreshold.toFixed(2)}</label>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={confidenceThreshold}
+                onChange={(e) => updateConfidence(parseFloat(e.target.value))}
+                className="slider"
+                disabled={serverStatus === 'offline'}
+              />
+            </div>
+
+            {videoInfo.source_type === 'video' && (
+              <div className="control-group">
+                <label>Frame: {videoInfo.current_frame || 0} / {videoInfo.total_frames || 0}</label>
+                <input
+                  type="range"
+                  min="0"
+                  max={videoInfo.total_frames || 0}
+                  value={videoInfo.current_frame || 0}
+                  onChange={(e) => seekVideo(parseInt(e.target.value))}
+                  className="slider"
+                  disabled={serverStatus === 'offline'}
+                />
+                <div className="video-info">
+                  Duration: {Math.round(videoInfo.duration_seconds || 0)}s | 
+                  FPS: {(videoInfo.fps || 0).toFixed(1)}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Real Statistics Section */}
+      <div className="stats-section">
+        <h2>📊 Real-Time Statistics</h2>
+        <div className="stats-grid">
+          <StatsCard
+            icon={Users}
+            title="Vehicles Detected"
+            value={stats.totalVehicles}
+            subtitle="Total crops saved"
+            color="#4ecdc4"
+            loading={loading}
+          />
+          <StatsCard
+            icon={Shield}
+            title="Helmet Violations"
+            value={stats.totalViolations}
+            subtitle="No helmet detected"
+            color="#ff6b6b"
+            loading={loading}
+          />
+          <StatsCard
+            icon={Activity}
+            title="Current FPS"
+            value={stats.currentFPS.toFixed(1)}
+            subtitle="Frames per second"
+            color="#ffa726"
+            loading={loading}
+          />
+          <StatsCard
+            icon={Clock}
+            title="Uptime"
+            value={Math.floor(stats.uptime / 1000 / 60)}
+            subtitle="Minutes running"
+            color="#9c27b0"
+            loading={loading}
+          />
+          <StatsCard
+            icon={Zap}
+            title="Memory Usage"
+            value={`${stats.memoryUsage.toFixed(1)}GB`}
+            subtitle="GPU memory"
+            color="#00bcd4"
+            loading={loading}
+          />
+          <StatsCard
+            icon={BarChart3}
+            title="Detection Rate"
+            value={detectionEnabled ? '100%' : '0%'}
+            subtitle="Detection active"
+            color={detectionEnabled ? '#4caf50' : '#f44336'}
+            loading={loading}
+          />
+        </div>
+      </div>
+
+      {/* Database Violations Management Section */}
+      <div className="violations-section">
+        <div className="violations-header">
+          <h2>🗄️ Database Violations Management</h2>
+          <div className="violations-controls">
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setShowViolationsSection(!showViolationsSection);
+                if (!showViolationsSection) {
+                  fetchDbViolations();
+                  fetchViolationsStats();
+                }
+              }}
+            >
+              <Database size={16} />
+              {showViolationsSection ? 'Hide Violations' : 'View Violations'}
+            </button>
+            {showViolationsSection && (
+              <button
+                className="btn btn-secondary"
+                onClick={exportViolations}
+                disabled={violationsLoading}
+              >
+                <Download size={16} />
+                Export CSV
+              </button>
+            )}
+          </div>
+        </div>
+
+        {showViolationsSection && (
+          <>
+            {/* Violations Statistics */}
+            <div className="violations-stats">
+              <div className="violation-stat-card">
+                <div className="stat-icon">
+                  <Shield size={20} />
+                </div>
+                <div className="stat-content">
+                  <div className="stat-value">{violationsStats.total_violations}</div>
+                  <div className="stat-label">Total Violations</div>
+                </div>
+              </div>
+              <div className="violation-stat-card">
+                <div className="stat-icon active">
+                  <Activity size={20} />
+                </div>
+                <div className="stat-content">
+                  <div className="stat-value">{violationsStats.active_violations}</div>
+                  <div className="stat-label">Active</div>
+                </div>
+              </div>
+              <div className="violation-stat-card">
+                <div className="stat-icon resolved">
+                  <CheckCircle size={20} />
+                </div>
+                <div className="stat-content">
+                  <div className="stat-value">{violationsStats.resolved_violations}</div>
+                  <div className="stat-label">Resolved</div>
+                </div>
+              </div>
+              <div className="violation-stat-card">
+                <div className="stat-icon dismissed">
+                  <XCircle size={20} />
+                </div>
+                <div className="stat-content">
+                  <div className="stat-value">{violationsStats.dismissed_violations}</div>
+                  <div className="stat-label">Dismissed</div>
+                </div>
+              </div>
+              <div className="violation-stat-card">
+                <div className="stat-icon recent">
+                  <Clock size={20} />
+                </div>
+                <div className="stat-content">
+                  <div className="stat-value">{violationsStats.recent_violations_24h}</div>
+                  <div className="stat-label">Last 24h</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Filters */}
+            <div className="violations-filters">
+              <div className="filter-group">
+                <Search size={16} />
+                <input
+                  type="text"
+                  placeholder="Search by number plate..."
+                  value={violationsFilter.search}
+                  onChange={(e) => handleFilterChange('search', e.target.value)}
+                  className="filter-input"
+                />
+              </div>
+              <div className="filter-group">
+                <Filter size={16} />
+                <select
+                  value={violationsFilter.status}
+                  onChange={(e) => handleFilterChange('status', e.target.value)}
+                  className="filter-select"
+                >
+                  <option value="">All Status</option>
+                  <option value="active">Active</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="dismissed">Dismissed</option>
+                </select>
+              </div>
+              <button
+                className="btn btn-toggle"
+                onClick={() => fetchDbViolations(violationsPagination.page, violationsFilter)}
+                disabled={violationsLoading}
+              >
+                <RefreshCw size={16} />
+                Refresh
+              </button>
+            </div>
+
+            {/* Violations Table */}
+            <div className="violations-table-container">
+              {violationsLoading ? (
+                <div className="loading-container">
+                  <LoadingSpinner size={40} />
+                  <p>Loading violations...</p>
+                </div>
+              ) : dbViolations.length > 0 ? (
+                <div className="violations-table">
+                  <div className="table-header">
+                    <div className="table-cell">Number Plate</div>
+                    <div className="table-cell">Type</div>
+                    <div className="table-cell">Timestamp</div>
+                    <div className="table-cell">Status</div>
+                    <div className="table-cell">Confidence</div>
+                    <div className="table-cell">Location</div>
+                    <div className="table-cell">Actions</div>
+                  </div>
+                  {dbViolations.map((violation) => (
+                    <div key={violation.number_plate} className="table-row">
+                      <div className="table-cell">
+                        <div className="number-plate">
+                          <Car size={16} />
+                          {violation.number_plate}
+                        </div>
+                      </div>
+                      <div className="table-cell">
+                        <span className="violation-type">
+                          {violation.violation_type.replace('_', ' ').toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="table-cell">
+                        <div className="timestamp">
+                          <Calendar size={14} />
+                          {new Date(violation.violation_timestamp).toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="table-cell">
+                        <span className={`status-badge ${violation.status}`}>
+                          {violation.status}
+                        </span>
+                      </div>
+                      <div className="table-cell">
+                        <div className="confidence">
+                          {(violation.confidence_score * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                      <div className="table-cell">
+                        <div className="location">
+                          <MapPin size={14} />
+                          {violation.location || 'Unknown'}
+                        </div>
+                      </div>
+                      <div className="table-cell">
+                        <div className="actions">
+                          {violation.image_url ? (
+                            <button
+                              className="action-btn view"
+                              onClick={() => {
+                                console.log('Opening image URL:', violation.image_url);
+                                window.open(violation.image_url, '_blank');
+                              }}
+                              title="View Image"
+                            >
+                              <ImageIcon size={14} />
+                            </button>
+                          ) : (
+                            <span className="no-image" title="No image available">
+                              <ImageIcon size={14} style={{opacity: 0.3}} />
+                            </span>
+                          )}
+                          {violation.status !== 'resolved' && (
+                            <button
+                              className="action-btn resolve"
+                              onClick={() => updateViolationStatus(violation.number_plate, 'resolved')}
+                              title="Mark as Resolved"
+                            >
+                              <CheckCircle size={14} />
+                            </button>
+                          )}
+                          {violation.status !== 'dismissed' && (
+                            <button
+                              className="action-btn dismiss"
+                              onClick={() => updateViolationStatus(violation.number_plate, 'dismissed')}
+                              title="Dismiss"
+                            >
+                              <XCircle size={14} />
+                            </button>
+                          )}
+                          <button
+                            className="action-btn delete"
+                            onClick={() => deleteViolation(violation.number_plate)}
+                            title="Delete"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="no-violations">
+                  <Database size={64} />
+                  <h3>No Violations Found</h3>
+                  <p>No violations match your current filters</p>
+                </div>
+              )}
+            </div>
+
+            {/* Pagination */}
+            {violationsPagination.pages > 1 && (
+              <div className="pagination">
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => handlePageChange(violationsPagination.page - 1)}
+                  disabled={!violationsPagination.has_prev || violationsLoading}
+                >
+                  <ChevronLeft size={16} />
+                  Previous
+                </button>
+                <div className="pagination-info">
+                  Page {violationsPagination.page} of {violationsPagination.pages}
+                  <span className="total-items">
+                    ({violationsPagination.total} total)
+                  </span>
+                </div>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => handlePageChange(violationsPagination.page + 1)}
+                  disabled={!violationsPagination.has_next || violationsLoading}
+                >
+                  Next
+                  <ChevronRight size={16} />
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Loading Overlay */}
+      {loading && <LoadingOverlay message="Processing..." />}
     </div>
   );
 }

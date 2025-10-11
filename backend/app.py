@@ -1,5 +1,6 @@
-from flask import Flask, Response, request, jsonify, render_template_string
+from flask import Flask, Response, request, jsonify, render_template_string, send_file
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -11,43 +12,15 @@ import base64
 import io
 from PIL import Image, ImageDraw, ImageFont
 import os
-import google.generativeai as genai
-from dotenv import load_dotenv
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
 
-# Load environment variables
-load_dotenv()
+# No file size limit - removed MAX_CONTENT_LENGTH setting
 
-# Initialize Gemini AI
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    print("✅ Gemini AI configured successfully")
-else:
-    print("⚠️  Gemini API key not found. Set GEMINI_API_KEY in .env file")
 
-# Pre-decided prompt for vehicle analysis
-VEHICLE_ANALYSIS_PROMPT = """
-Analyze the attached cropped image of an Indian vehicle’s number plate.
-Extract the plate text accurately using OCR and return only the structured JSON below.
-Be precise — if any character is unclear, replace it with _.
-If the plate is unreadable, return "not_visible".
-{
-  "plate_text": "exact text as seen on the number plate (uppercase, include letters and numbers only)",
-  "normalized_plate": "standardized text (remove extra spaces/dashes, keep valid Indian format)",
-  "state_code": "two-letter Indian state/UT code (e.g., 'KA' for Karnataka) or 'unknown'",
-  "confidence": "high/medium/low based on OCR certainty",
-  "plate_condition": "clear/partially_visible/damaged/dirty",
-  "notes": "any observation (e.g., 'slightly blurred', 'angled image', 'low light')"
-}
-Do not include any extra explanations or text outside the JSON.
-"""
 
 # -----------------------------
 # Simple IOU-based object tracker
@@ -148,13 +121,9 @@ def load_yolo_model_safe(model_path):
         torch.serialization.add_safe_globals([DetectionModel])
         
         model = YOLO(model_path)
-        print(f"✅ Model loaded successfully: {model_path}")
         return model
         
     except Exception as e1:
-        print(f"⚠️  Method 1 failed: {e1}")
-        print("💡 Trying alternative method...")
-        
         try:
             # Method 2: Monkey patch torch.load
             import torch
@@ -168,47 +137,31 @@ def load_yolo_model_safe(model_path):
             model = YOLO(model_path)
             torch.load = original_load  # Restore original
             
-            print(f"✅ Model loaded with fallback method: {model_path}")
             return model
             
         except Exception as e2:
-            print(f"❌ Method 2 also failed: {e2}")
-            
             try:
                 # Method 3: Set environment variable
                 import os
                 os.environ['TORCH_SERIALIZATION_WEIGHTS_ONLY'] = 'False'
                 model = YOLO(model_path)
-                print(f"✅ Model loaded with env variable method: {model_path}")
                 return model
                 
             except Exception as e3:
-                print(f"❌ All methods failed!")
-                print(f"Error 1: {e1}")
-                print(f"Error 2: {e2}")
-                print(f"Error 3: {e3}")
                 raise Exception(f"Could not load YOLO model {model_path}. Try updating ultralytics or downgrading PyTorch.")
 
 class VideoInferenceProcessor:
     def __init__(self, vehicle_model_path="best.pt", helmet_model_path="helmetv3.pt"):
         """Initialize the video inference processor with local YOLO models."""
-        print("🚀 Initializing Video Inference Processor...")
-        
         # Detect and set up GPU/CPU device
         self.device = self.detect_device()
-        print(f"🖥️  Using device: {self.device}")
         
         # Load models using safe loading function
-        print(f"📦 Loading vehicle model: {vehicle_model_path}")
         self.vehicle_model = load_yolo_model_safe(vehicle_model_path)
-        
-        print(f"📦 Loading helmet model: {helmet_model_path}")
         self.helmet_model = load_yolo_model_safe(helmet_model_path)
         
         # Move models to device
         self.setup_models_on_device()
-        
-        print("✅ All models loaded successfully!")
         
         self.camera = None
         self.video_source = None  # Can be camera index or video file path
@@ -216,7 +169,7 @@ class VideoInferenceProcessor:
         self.is_streaming = False
         self.detection_mode = "vehicle"  # "vehicle", "helmet", or "both"
         self.detection_enabled = True
-        self.confidence_threshold = 0.4
+        self.confidence_threshold = 0.3
         self.vehicle_classes = [0]  # YOLO vehicle class indices
         
         # Video playback controls
@@ -262,6 +215,9 @@ class VideoInferenceProcessor:
         self.last_helmet_analysis_time = 0
         self.helmet_analysis_interval = 0.5  # Analyze crops every 0.5 seconds
         self.violations = []  # Store violation records
+        
+        # Number plate extraction (placeholder - you can implement OCR here)
+        self.number_plate_counter = 1
     
     def detect_device(self):
         """Detect the best available device (GPU/CPU)."""
@@ -271,49 +227,32 @@ class VideoInferenceProcessor:
             # Check if CUDA is available
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()
-                print(f"🎮 CUDA available! Found {device_count} GPU(s)")
-                
-                # Get GPU information
-                for i in range(device_count):
-                    gpu_name = torch.cuda.get_device_name(i)
-                    gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
-                    print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
-                
                 # Use the first GPU
                 device = "cuda:0"
                 
                 # Test GPU availability
                 try:
                     test_tensor = torch.tensor([1.0]).to(device)
-                    print(f"✅ GPU test successful on {device}")
                     return device
                 except Exception as e:
-                    print(f"⚠️  GPU test failed: {e}")
                     return "cpu"
             else:
-                print("❌ CUDA not available")
                 return "cpu"
                 
         except ImportError:
-            print("❌ PyTorch not available")
             return "cpu"
         except Exception as e:
-            print(f"❌ Error detecting device: {e}")
             return "cpu"
     
     def setup_models_on_device(self):
         """Move models to the detected device."""
         try:
             if self.device != "cpu":
-                print(f"🚀 Moving models to {self.device}...")
-                
                 # Move vehicle model
                 self.vehicle_model.to(self.device)
-                print(f"✅ Vehicle model moved to {self.device}")
                 
                 # Move helmet model  
                 self.helmet_model.to(self.device)
-                print(f"✅ Helmet model moved to {self.device}")
                 
                 # Optimize GPU backends
                 import torch
@@ -324,14 +263,8 @@ class VideoInferenceProcessor:
                         torch.backends.cuda.matmul.allow_tf32 = True
                 except Exception:
                     pass
-                print(f"✅ GPU backends optimized (cuDNN benchmark, TF32 if available)")
-                
-            else:
-                print("🔄 Using CPU for inference")
                 
         except Exception as e:
-            print(f"⚠️  Failed to move models to GPU: {e}")
-            print("🔄 Falling back to CPU")
             self.device = "cpu"
             
             # Ensure models are on CPU
@@ -348,7 +281,6 @@ class VideoInferenceProcessor:
             self.source_type = source_type
             
             if source_type == "camera":
-                print(f"📹 Starting camera: {source}")
                 self.camera = cv2.VideoCapture(int(source))
                 if not self.camera.isOpened():
                     # Try with different backends
@@ -364,9 +296,7 @@ class VideoInferenceProcessor:
                     return True
                     
             elif source_type == "video":
-                print(f"🎬 Starting video file: {source}")
                 if not os.path.exists(source):
-                    print(f"❌ Video file not found: {source}")
                     return False
                 
                 self.camera = cv2.VideoCapture(source)
@@ -375,14 +305,11 @@ class VideoInferenceProcessor:
                     self.fps = self.camera.get(cv2.CAP_PROP_FPS)
                     self.total_frames = int(self.camera.get(cv2.CAP_PROP_FRAME_COUNT))
                     self.current_frame = 0
-                    
-                    print(f"📊 Video info: {self.total_frames} frames, {self.fps:.2f} FPS")
                     return True
             
             return False
             
         except Exception as e:
-            print(f"Error starting source: {e}")
             return False
     
     def start_camera(self, camera_index=0):
@@ -420,7 +347,7 @@ class VideoInferenceProcessor:
                 self.current_frame = frame_number
                 return True
             except Exception as e:
-                print(f"Error seeking video: {e}")
+                pass
         return False
     
     def get_video_info(self):
@@ -465,6 +392,7 @@ class VideoInferenceProcessor:
                 'error': str(e)
             }
     
+    
     def save_vehicle_crops(self, frame, vehicle_detections):
         """Save cropped vehicle images every 2 seconds (only if larger than 135x332)."""
         current_time = time.time()
@@ -496,7 +424,6 @@ class VideoInferenceProcessor:
                 # Check minimum size requirements
                 if crop_width < self.min_crop_width or crop_height < self.min_crop_height:
                     skipped_count += 1
-                    print(f"⏭️ Skipped small crop: {crop_width}x{crop_height} (min: {self.min_crop_width}x{self.min_crop_height})")
                     continue
                 
                 # Crop the vehicle region
@@ -515,19 +442,12 @@ class VideoInferenceProcessor:
                 success = cv2.imwrite(filepath, cropped_vehicle)
                 if success:
                     saved_count += 1
-                    print(f"💾 Saved vehicle crop: {filename} ({crop_width}x{crop_height})")
-                    
-                    # Note: Gemini analysis now handled by separate pipeline
             
             if saved_count > 0 or skipped_count > 0:
                 self.last_save_time = current_time
-                if saved_count > 0:
-                    print(f"✅ Saved {saved_count} vehicle crops to {self.cropped_images_dir}/")
-                if skipped_count > 0:
-                    print(f"⏭️ Skipped {skipped_count} crops (too small)")
                 
         except Exception as e:
-            print(f"❌ Error saving vehicle crops: {e}")
+            pass
     
     # Note: Gemini analysis functions removed - now handled by separate pipeline
     
@@ -612,12 +532,12 @@ class VideoInferenceProcessor:
                             cv2.putText(annotated_crop, label_text, (x1, y2 + 20), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                         
-                        # Save violation image to violation folder
+                        # Save violation image to violation folder for ImagePipeline processing
                         violation_filename = f"violation_{crop_file}"
                         violation_path = os.path.join(self.violation_dir, violation_filename)
                         cv2.imwrite(violation_path, annotated_crop)
                         
-                        # Add violation record
+                        # Add violation record to memory (for backward compatibility)
                         violation_record = {
                             'crop_file': crop_file,
                             'violation_file': violation_filename,
@@ -627,9 +547,6 @@ class VideoInferenceProcessor:
                         }
                         self.violations.append(violation_record)
                         
-                        print(f"🚨 VIOLATION DETECTED: Vehicle ID {vehicle_id} - No helmet detected!")
-                        print(f"   💾 Saved violation image: {violation_filename}")
-                        
                         # Store result info for violations only
                         self.helmet_results.append({
                             'crop_file': crop_file,
@@ -638,11 +555,6 @@ class VideoInferenceProcessor:
                             'vehicle_id': vehicle_id,
                             'timestamp': current_time
                         })
-                        
-                        print(f"🪖 Helmet detection completed: Vehicle ID {vehicle_id} -> {len(helmet_detections)} detections (VIOLATION SAVED)")
-                    else:
-                        # Just log that helmet was detected (no violation)
-                        print(f"🪖 Helmet detection completed: Vehicle ID {vehicle_id} -> {len(helmet_detections)} detections (helmet detected, no violation)")
             
             # Keep only recent results (last 100)
             if len(self.helmet_results) > 100:
@@ -655,7 +567,7 @@ class VideoInferenceProcessor:
             self.last_helmet_analysis_time = current_time
             
         except Exception as e:
-            print(f"❌ Error in helmet detection pipeline: {e}")
+            pass
     
     def perform_vehicle_detection(self, frame):
         """Perform vehicle detection on a frame."""
@@ -681,7 +593,6 @@ class VideoInferenceProcessor:
             
             return detections
         except Exception as e:
-            print(f"Vehicle detection error: {e}")
             return []
     
     def perform_helmet_detection(self, frame):
@@ -708,7 +619,6 @@ class VideoInferenceProcessor:
             
             return detections
         except Exception as e:
-            print(f"Helmet detection error: {e}")
             return []
     
     def perform_inference(self, frame):
@@ -736,7 +646,6 @@ class VideoInferenceProcessor:
             
             return all_detections
         except Exception as e:
-            print(f"Inference error: {e}")
             return []
     
     def draw_predictions(self, frame, predictions):
@@ -840,72 +749,72 @@ class VideoInferenceProcessor:
                     )
                 
             except Exception as e:
-                print(f"Error drawing prediction: {e}")
                 continue
         
         return frame
     
     def generate_helmet_frames(self):
-        """Generate video frames showing helmet detection results on vehicle crops."""
+        """Generate video frames showing helmet violation images from violation folder."""
+        current_image_index = 0
+        violation_images = []
+        
         while self.is_streaming:
             try:
-                # Get the most recent helmet detection result
-                if not self.helmet_results:
-                    # Show placeholder if no results
+                # Get violation images from violation folder
+                if os.path.exists(self.violation_dir):
+                    violation_files = [f for f in os.listdir(self.violation_dir) 
+                                     if f.lower().endswith('.jpg') and 'violation_vehicle_' in f]
+                    violation_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.violation_dir, x)), reverse=True)
+                    violation_images = violation_files
+                
+                if not violation_images:
+                    # Show placeholder if no violations
                     frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(frame, "No helmet detection results yet", (50, 240), 
+                    cv2.putText(frame, "No helmet violations detected", (50, 240), 
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    cv2.putText(frame, "Waiting for vehicle crops...", (50, 280), 
+                    cv2.putText(frame, "Waiting for violations...", (50, 280), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
                 else:
-                    # Get the most recent result
-                    latest_result = self.helmet_results[-1]
-                    result_path = os.path.join(self.helmet_results_dir, latest_result['result_file'])
+                    # Cycle through violation images
+                    if current_image_index >= len(violation_images):
+                        current_image_index = 0
                     
-                    if os.path.exists(result_path):
-                        frame = cv2.imread(result_path)
+                    violation_file = violation_images[current_image_index]
+                    violation_path = os.path.join(self.violation_dir, violation_file)
+                    
+                    if os.path.exists(violation_path):
+                        frame = cv2.imread(violation_path)
                         if frame is not None:
-                            # Extract vehicle ID from filename
-                            crop_filename = latest_result['crop_file']
-                            vehicle_id = "Unknown"
-                            if "ID" in crop_filename:
-                                try:
-                                    id_start = crop_filename.find("ID") + 2
-                                    id_end = crop_filename.find("_", id_start)
-                                    if id_end == -1:
-                                        id_end = crop_filename.find("x", id_start)
-                                    vehicle_id = crop_filename[id_start:id_end]
-                                except:
-                                    vehicle_id = "Unknown"
+                            # Resize frame to standard size
+                            height, width = frame.shape[:2]
+                            if width > 640 or height > 480:
+                                scale = min(640/width, 480/height)
+                                new_width = int(width * scale)
+                                new_height = int(height * scale)
+                                frame = cv2.resize(frame, (new_width, new_height))
                             
                             # Add info overlay
-                            info_text = f"Helmet Detection Results - {len(self.helmet_results)} total"
+                            info_text = f"Helmet Violations - {len(violation_images)} total"
                             cv2.putText(frame, info_text, (10, 30), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
-                            # Add vehicle ID
-                            vehicle_text = f"Vehicle ID: {vehicle_id}"
-                            cv2.putText(frame, vehicle_text, (10, 60), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                            
-                            # Add detection count
-                            det_count = len(latest_result['detections'])
-                            count_text = f"Detections: {det_count}"
-                            cv2.putText(frame, count_text, (10, 90), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                            # Add violation count
+                            count_text = f"Violation {current_image_index + 1} of {len(violation_images)}"
+                            cv2.putText(frame, count_text, (10, 60), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                             
                             # Add timestamp
                             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             cv2.putText(frame, timestamp, (10, frame.shape[0] - 10), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                         else:
-                            frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                            cv2.putText(frame, "Error loading helmet result", (50, 240), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                            # Skip this image and move to next
+                            current_image_index = (current_image_index + 1) % len(violation_images)
+                            continue
                     else:
-                        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                        cv2.putText(frame, "Helmet result file not found", (50, 240), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                        # Skip this image and move to next
+                        current_image_index = (current_image_index + 1) % len(violation_images)
+                        continue
                 
                 # Encode frame as JPEG
                 ret, buffer = cv2.imencode(
@@ -921,11 +830,14 @@ class VideoInferenceProcessor:
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 
-                # Update every 0.5 seconds
-                time.sleep(0.5)
+                # Move to next image
+                if violation_images:
+                    current_image_index = (current_image_index + 1) % len(violation_images)
+                
+                # Update every 2 seconds
+                time.sleep(2.0)
                 
             except Exception as e:
-                print(f"Helmet frame generation error: {e}")
                 break
 
     # -----------------------------
@@ -1062,7 +974,6 @@ class VideoInferenceProcessor:
                     time.sleep(0.033)
                 
             except Exception as e:
-                print(f"Frame generation error: {e}")
                 break
 
 # Global processor instance
@@ -1155,6 +1066,44 @@ def helmet_feed():
         processor.generate_helmet_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
+
+@app.route('/violation/<filename>')
+def serve_violation_image(filename):
+    """Serve individual violation images."""
+    try:
+        violation_path = os.path.join(processor.violation_dir, filename)
+        if os.path.exists(violation_path):
+            return send_file(violation_path, mimetype='image/jpeg')
+        else:
+            return "Image not found", 404
+    except Exception as e:
+        return f"Error serving image: {str(e)}", 500
+
+# Add static file serving for violation directory
+@app.route('/violation/')
+def list_violations():
+    """List available violation images."""
+    try:
+        if os.path.exists(processor.violation_dir):
+            files = [f for f in os.listdir(processor.violation_dir) 
+                    if f.lower().endswith('.jpg') and 'violation_vehicle_' in f]
+            files.sort(key=lambda x: os.path.getmtime(os.path.join(processor.violation_dir, x)), reverse=True)
+            return jsonify({
+                'success': True,
+                'files': files,
+                'count': len(files)
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'files': [],
+                'count': 0
+            })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
@@ -1484,109 +1433,6 @@ def set_min_crop_size():
             'message': f'Error setting minimum crop size: {str(e)}'
         }), 500
 
-@app.route('/toggle_gemini_analysis', methods=['POST'])
-def toggle_gemini_analysis():
-    """Toggle Gemini AI analysis on/off."""
-    try:
-        if not processor.gemini_enabled:
-            return jsonify({
-                'success': False,
-                'message': 'Gemini AI not configured. Set GEMINI_API_KEY in .env file'
-            }), 400
-        
-        processor.gemini_analysis_enabled = not processor.gemini_analysis_enabled
-        return jsonify({
-            'success': True,
-            'gemini_analysis_enabled': processor.gemini_analysis_enabled,
-            'message': f'Gemini analysis {"enabled" if processor.gemini_analysis_enabled else "disabled"}'
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Error toggling Gemini analysis: {str(e)}'
-        }), 500
-
-@app.route('/gemini_results', methods=['GET'])
-def get_gemini_results():
-    """Get Gemini analysis results."""
-    try:
-        # Get query parameters
-        limit = request.args.get('limit', 20, type=int)
-        
-        # Get recent results
-        results = []
-        for filename, analysis in list(processor.analysis_results.items())[-limit:]:
-            results.append({
-                'filename': filename,
-                'analysis': analysis,
-                'timestamp': analysis.get('analysis_timestamp', 0)
-            })
-        
-        # Sort by timestamp (newest first)
-        results.sort(key=lambda x: x['timestamp'], reverse=True)
-        
-        return jsonify({
-            'success': True,
-            'total_analyses': len(processor.analysis_results),
-            'results': results,
-            'gemini_enabled': processor.gemini_enabled,
-            'analysis_enabled': processor.gemini_analysis_enabled
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Error getting Gemini results: {str(e)}'
-        }), 500
-
-@app.route('/analyze_image', methods=['POST'])
-def analyze_single_image():
-    """Analyze a single image with Gemini AI."""
-    try:
-        if not processor.gemini_enabled:
-            return jsonify({
-                'success': False,
-                'message': 'Gemini AI not configured'
-            }), 400
-        
-        data = request.get_json()
-        filename = data.get('filename', '')
-        
-        if not filename:
-            return jsonify({
-                'success': False,
-                'message': 'Filename required'
-            }), 400
-        
-        filepath = os.path.join(processor.cropped_images_dir, filename)
-        
-        if not os.path.exists(filepath):
-            return jsonify({
-                'success': False,
-                'message': 'File not found'
-            }), 404
-        
-        # Analyze the image
-        analysis = processor.analyze_image_with_gemini(filepath)
-        
-        if analysis:
-            processor.analysis_results[filename] = analysis
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'analysis': analysis
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'Analysis failed'
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Error analyzing image: {str(e)}'
-        }), 500
 
 @app.route('/crop_info', methods=['GET'])
 def get_crop_info():
@@ -1890,11 +1736,6 @@ def get_status():
             'min_crop_width': processor.min_crop_width,
             'min_crop_height': processor.min_crop_height
         },
-        'gemini_info': {
-            'note': 'Gemini analysis now handled by separate ImagePipeline.py',
-            'total_analyses': len(processor.analysis_results),
-            'api_key_configured': bool(GEMINI_API_KEY)
-        },
         'roi': {
             'enabled': processor.roi_enabled,
             'points': processor.roi_polygon
@@ -1915,10 +1756,7 @@ def get_status():
         }
     })
 
+# -----------------------------
+
 if __name__ == '__main__':
-    print("🚀 Starting Video Inference Server...")
-    print("📹 Make sure you have a camera connected")
-    print("🌐 Server will be available at: http://localhost:5000")
-    print("📡 Video stream endpoint: http://localhost:5000/video_feed")
-    
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)

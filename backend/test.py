@@ -20,10 +20,8 @@ USE_FP16    = True              # set False if you see artifacts on some GPUs
 # --------------------------
 if torch.cuda.is_available():
     DEVICE = "cuda:0"
-    print("✅ Using GPU:", torch.cuda.get_device_name(0))
 else:
     DEVICE = "cpu"
-    print("⚠️ CUDA not available, using CPU.")
 
 # Load YOLO model and move to device
 model = YOLO(MODEL_PATH)
@@ -33,16 +31,14 @@ model.to(DEVICE)
 if DEVICE.startswith("cuda") and USE_FP16:
     try:
         model.model.half()  # use half precision
-        print("🔧 FP16 enabled for inference.")
     except Exception as e:
-        print("FP16 not enabled:", e)
+        pass
 
 # --------------------------
 # VIDEO
 # --------------------------
 cap = cv2.VideoCapture(VIDEO_PATH)
 if not cap.isOpened():
-    print("❌ Error: Could not open video.")
     raise SystemExit
 
 # --------------------------
