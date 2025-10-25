@@ -169,7 +169,7 @@ class VideoInferenceProcessor:
         self.is_streaming = False
         self.detection_mode = "vehicle"  # "vehicle", "helmet", or "both"
         self.detection_enabled = True
-        self.confidence_threshold = 0.3
+        self.confidence_threshold = 0.32
         self.vehicle_classes = [0]  # YOLO vehicle class indices
         
         # Video playback controls
@@ -183,7 +183,7 @@ class VideoInferenceProcessor:
         self.helmet_dir = "helmet_saved"
         self.cropped_images_dir = "cropped_images"  # New directory for vehicle crops
         self.helmet_results_dir = "helmet_results"  # Directory for helmet detection results
-        self.violation_dir = "violation"  # Directory for no helmet violations
+        self.violation_dir = "violation"  # Directory for all violations (with no helmet count in filename and image)
         os.makedirs(self.crop_dir, exist_ok=True)
         os.makedirs(self.helmet_dir, exist_ok=True)
         os.makedirs(self.cropped_images_dir, exist_ok=True)
@@ -426,16 +426,30 @@ class VideoInferenceProcessor:
                     skipped_count += 1
                     continue
                 
-                # Crop the vehicle region
-                cropped_vehicle = frame[y1:y2, x1:x2]
+                # Add 20 pixels padding to all sides of the crop
+                padding = 50
+                frame_height, frame_width = frame.shape[:2]
+                
+                # Expand the bounding box with padding, ensuring we stay within frame boundaries
+                x1_padded = max(0, x1 - padding)
+                y1_padded = max(0, y1 - padding)
+                x2_padded = min(frame_width, x2 + padding)
+                y2_padded = min(frame_height, y2 + padding)
+                
+                # Crop the vehicle region with padding
+                cropped_vehicle = frame[y1_padded:y2_padded, x1_padded:x2_padded]
                 
                 if cropped_vehicle.size == 0:
                     continue
                 
-                # Create filename with timestamp, vehicle ID, and detection info
+                # Update crop dimensions to reflect actual padded size
+                actual_crop_width = x2_padded - x1_padded
+                actual_crop_height = y2_padded - y1_padded
+                
+                # Create filename with timestamp, vehicle ID, and detection info (using actual crop dimensions)
                 confidence = detection.get('confidence', 0)
                 track_id = detection.get('track_id', 'unknown')
-                filename = f"vehicle_{timestamp}_ID{track_id}_{crop_width}x{crop_height}_conf{confidence:.2f}.jpg"
+                filename = f"vehicle_{timestamp}_ID{track_id}_{actual_crop_width}x{actual_crop_height}_conf{confidence:.2f}.jpg"
                 filepath = os.path.join(self.cropped_images_dir, filename)
                 
                 # Save the cropped image
@@ -513,6 +527,8 @@ class VideoInferenceProcessor:
                     
                     # Only process and save if there are no_helmet violations
                     if no_helmet_detections:
+                        no_helmet_count = len(no_helmet_detections)
+                        
                         # Create annotated image only for violations
                         annotated_crop = crop_image.copy()
                         
@@ -532,17 +548,33 @@ class VideoInferenceProcessor:
                             cv2.putText(annotated_crop, label_text, (x1, y2 + 20), 
                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                         
-                        # Save violation image to violation folder for ImagePipeline processing
-                        violation_filename = f"violation_{crop_file}"
+                        # Add violation count info to the image
+                        count_text = f"No Helmets: {no_helmet_count}"
+                        cv2.putText(annotated_crop, count_text, (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        
+                        # Determine violation type based on no-helmet count (for record keeping)
+                        if no_helmet_count == 1:
+                            violation_type = "single_no_helmet"
+                        elif no_helmet_count >= 2:
+                            violation_type = "multiple_no_helmet"
+                        else:
+                            violation_type = "no_helmet"
+                        
+                        # Save all violations to the single violation directory with no-helmet count in filename
+                        violation_filename = f"violation_{crop_file.replace('.jpg', f'_nohelmets{no_helmet_count}.jpg')}"
                         violation_path = os.path.join(self.violation_dir, violation_filename)
                         cv2.imwrite(violation_path, annotated_crop)
                         
-                        # Add violation record to memory (for backward compatibility)
+                        # Add violation record to memory with violation type
                         violation_record = {
                             'crop_file': crop_file,
                             'violation_file': violation_filename,
                             'vehicle_id': vehicle_id,
                             'detections': no_helmet_detections,
+                            'no_helmet_count': no_helmet_count,
+                            'violation_type': violation_type,
+                            'directory': self.violation_dir,
                             'timestamp': current_time
                         }
                         self.violations.append(violation_record)
@@ -552,6 +584,8 @@ class VideoInferenceProcessor:
                             'crop_file': crop_file,
                             'result_file': violation_filename,
                             'detections': helmet_detections,
+                            'no_helmet_count': no_helmet_count,
+                            'violation_type': violation_type,
                             'vehicle_id': vehicle_id,
                             'timestamp': current_time
                         })
@@ -1079,6 +1113,32 @@ def serve_violation_image(filename):
     except Exception as e:
         return f"Error serving image: {str(e)}", 500
 
+@app.route('/no_helmet/<filename>')
+def serve_no_helmet_image(filename):
+    """Serve individual no-helmet violation images (now from violation directory)."""
+    try:
+        # All violations are now stored in violation_dir
+        violation_path = os.path.join(processor.violation_dir, filename)
+        if os.path.exists(violation_path):
+            return send_file(violation_path, mimetype='image/jpeg')
+        else:
+            return "Image not found", 404
+    except Exception as e:
+        return f"Error serving image: {str(e)}", 500
+
+@app.route('/triple_riding/<filename>')
+def serve_triple_riding_image(filename):
+    """Serve individual triple riding violation images (now from violation directory)."""
+    try:
+        # All violations are now stored in violation_dir
+        violation_path = os.path.join(processor.violation_dir, filename)
+        if os.path.exists(violation_path):
+            return send_file(violation_path, mimetype='image/jpeg')
+        else:
+            return "Image not found", 404
+    except Exception as e:
+        return f"Error serving image: {str(e)}", 500
+
 # Add static file serving for violation directory
 @app.route('/violation/')
 def list_violations():
@@ -1087,6 +1147,59 @@ def list_violations():
         if os.path.exists(processor.violation_dir):
             files = [f for f in os.listdir(processor.violation_dir) 
                     if f.lower().endswith('.jpg') and 'violation_vehicle_' in f]
+            files.sort(key=lambda x: os.path.getmtime(os.path.join(processor.violation_dir, x)), reverse=True)
+            return jsonify({
+                'success': True,
+                'files': files,
+                'count': len(files)
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'files': [],
+                'count': 0
+            })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/no_helmet/')
+def list_no_helmet_violations():
+    """List available single no-helmet violation images (from violation directory)."""
+    try:
+        if os.path.exists(processor.violation_dir):
+            # Filter files with nohelmets1 in filename
+            files = [f for f in os.listdir(processor.violation_dir) 
+                    if f.lower().endswith('.jpg') and 'violation_vehicle_' in f and 'nohelmets1' in f]
+            files.sort(key=lambda x: os.path.getmtime(os.path.join(processor.violation_dir, x)), reverse=True)
+            return jsonify({
+                'success': True,
+                'files': files,
+                'count': len(files)
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'files': [],
+                'count': 0
+            })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/triple_riding/')
+def list_triple_riding_violations():
+    """List available multiple no-helmet violation images (from violation directory)."""
+    try:
+        if os.path.exists(processor.violation_dir):
+            # Filter files with nohelmets2, nohelmets3, etc. in filename
+            files = [f for f in os.listdir(processor.violation_dir) 
+                    if f.lower().endswith('.jpg') and 'violation_vehicle_' in f and 
+                    any(f'nohelmets{i}' in f for i in range(2, 10))]  # Support nohelmets2 to nohelmets9
             files.sort(key=lambda x: os.path.getmtime(os.path.join(processor.violation_dir, x)), reverse=True)
             return jsonify({
                 'success': True,
@@ -1748,7 +1861,12 @@ def get_status():
         },
         'violations': {
             'total_violations': len(processor.violations),
-            'violation_directory': processor.violation_dir
+            'violation_directory': processor.violation_dir,
+            'violation_categories': {
+                'single_no_helmet': len([v for v in processor.violations if v.get('violation_type') == 'single_no_helmet']),
+                'multiple_no_helmet': len([v for v in processor.violations if v.get('violation_type') == 'multiple_no_helmet'])
+            },
+            'note': 'All violations are stored in violation_directory with no_helmet count in filename'
         },
         'models_loaded': {
             'vehicle_model': 'best.pt',

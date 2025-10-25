@@ -127,6 +127,10 @@ function App() {
   });
   const [showViolationsSection, setShowViolationsSection] = useState(false);
   
+  // Modal state for image expansion
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [showModal, setShowModal] = useState(false);
+  
   const videoRef = useRef(null);
   const helmetVideoRef = useRef(null);
   const statusCheckInterval = useRef(null);
@@ -485,29 +489,44 @@ function App() {
     fetchDbViolations(newPage, violationsFilter);
   };
 
+  // Modal functions
+  const openImageModal = (image) => {
+    setSelectedImage(image);
+    setShowModal(true);
+  };
+
+  const closeImageModal = () => {
+    setShowModal(false);
+    setSelectedImage(null);
+  };
+
   return (
     <div className="app">
-      {/* Header Section */}
+      {/* Header Section - Top Left Layout */}
       <header className="header">
-        <h1>🎥 Safehead - Vehicle & Helmet Detection</h1>
-        <p>Real-time vehicle detection with automatic helmet analysis pipeline</p>
+        <div className="header-left">
+          <h1>Safehead</h1>
+          <p>Vehicle & Helmet Detection System</p>
+        </div>
         
-        {/* Status Indicator */}
-        <div className="status-indicator">
-          <div className={`status-dot ${serverStatus}`}></div>
-          <span className="status-text">
-            {serverStatus === 'online' ? (
-              <>
-                <Wifi size={16} style={{ marginRight: '0.5rem' }} />
-                Server Online
-              </>
-            ) : (
-              <>
-                <WifiOff size={16} style={{ marginRight: '0.5rem' }} />
-                Server Offline
-              </>
-            )}
-          </span>
+        <div className="header-right">
+          {/* Status Indicator */}
+          <div className="status-indicator">
+            <div className={`status-dot ${serverStatus}`}></div>
+            <span className="status-text">
+              {serverStatus === 'online' ? (
+                <>
+                  <Wifi size={16} style={{ marginRight: '0.5rem' }} />
+                  Online
+                </>
+              ) : (
+                <>
+                  <WifiOff size={16} style={{ marginRight: '0.5rem' }} />
+                  Offline
+                </>
+              )}
+            </span>
+          </div>
         </div>
       </header>
 
@@ -519,14 +538,32 @@ function App() {
         </div>
       )}
 
-      {/* Main Video Stream Section */}
-      <div className="main-stream-section">
-        <div className="stream-header">
-          <h2>🚗 Main Detection Stream</h2>
+      {/* Main Video Section - Centered Layout */}
+      <div className="main-video-section">
+        <div className="video-container">
+          {isStreaming ? (
+            <img
+              ref={videoRef}
+              src={`${API_BASE_URL}/video_feed`}
+              alt="Main Detection Stream"
+              className="video-stream"
+              onError={() => setError('Video stream error. Check camera connection.')}
+            />
+          ) : (
+            <div className="video-placeholder">
+              <Camera size={64} />
+              <h3>Stream Not Active</h3>
+              <p>Click "Start Stream" to begin detection</p>
+            </div>
+          )}
+        </div>
+
+        {/* Video Controls - Below Video */}
+        <div className="video-controls">
           <div className="stream-controls">
             <div className="source-selector">
               <button
-                className={`btn ${sourceType === 'camera' ? 'btn-primary' : 'btn-secondary'}`}
+                className={`btn ${sourceType === 'camera' ? 'btn-primary' : 'btn-outline'}`}
                 onClick={() => setSourceType('camera')}
                 disabled={isStreaming || loading}
               >
@@ -534,7 +571,7 @@ function App() {
                 Camera
               </button>
               <button
-                className={`btn ${sourceType === 'video' ? 'btn-primary' : 'btn-secondary'}`}
+                className={`btn ${sourceType === 'video' ? 'btn-primary' : 'btn-outline'}`}
                 onClick={() => setSourceType('video')}
                 disabled={isStreaming || loading}
               >
@@ -552,7 +589,7 @@ function App() {
                   disabled={loading || isStreaming}
                   id="video-upload"
                 />
-                <label htmlFor="video-upload" className="upload-label">
+                <label htmlFor="video-upload" className="btn btn-outline">
                   {loading ? <LoadingSpinner size={16} /> : <Upload size={16} />}
                   {videoFile ? 'Change Video' : 'Select Video File'}
                 </label>
@@ -594,34 +631,16 @@ function App() {
             </div>
           </div>
         </div>
-
-        <div className="video-container">
-          {isStreaming ? (
-            <img
-              ref={videoRef}
-              src={`${API_BASE_URL}/video_feed`}
-              alt="Main Detection Stream"
-              className="video-stream"
-              onError={() => setError('Video stream error. Check camera connection.')}
-            />
-          ) : (
-            <div className="video-placeholder">
-              <Camera size={64} />
-              <h3>Stream Not Active</h3>
-              <p>Click "Start Stream" to begin detection</p>
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* Helmet Detection Stream Section */}
-      <div className="helmet-stream-section">
-        <div className="stream-header">
-          <h2>🪖 Helmet Violation Stream</h2>
-          <div className="helmet-stats">
+      {/* Violations Section - Clickable Images */}
+      <div className="violations-section">
+        <div className="violations-header">
+          <h2>Recent Violations</h2>
+          <div className="violations-controls">
             <span className="stat-badge">
               <Shield size={16} />
-              {stats.totalViolations} Violations
+              {stats.totalViolations} Total
             </span>
             <span className="stat-badge">
               <Activity size={16} />
@@ -630,49 +649,51 @@ function App() {
           </div>
         </div>
 
-        <div className="helmet-container">
-          {violationImages.length > 0 ? (
-            <div className="violation-gallery">
-              {violationImages.slice(0, 6).map((image, index) => {
-                console.log(`🖼️ Rendering image ${index}:`, image);
-                return (
-                  <div key={index} className="violation-item">
-                    <img
-                      src={image.image_url || `${API_BASE_URL}/violation/${image.filename}`}
-                      alt={`Violation ${index + 1}`}
-                      className="violation-image"
-                      onError={(e) => {
-                        console.log(`❌ Image failed to load:`, e.target.src);
-                        e.target.style.display = 'none';
-                      }}
-                      onLoad={() => console.log(`✅ Image loaded:`, image.image_url || image.filename)}
-                    />
-                    <div className="violation-info">
-                      <span className="violation-time">
-                        {new Date(image.created * 1000).toLocaleTimeString()}
+        {violationImages.length > 0 ? (
+          <div className="violation-gallery">
+            {violationImages.slice(0, 6).map((image, index) => {
+              console.log(`🖼️ Rendering image ${index}:`, image);
+              return (
+                <div 
+                  key={index} 
+                  className="violation-item"
+                  onClick={() => openImageModal(image)}
+                >
+                  <img
+                    src={image.image_url || `${API_BASE_URL}/violation/${image.filename}`}
+                    alt={`Violation ${index + 1}`}
+                    className="violation-image"
+                    onError={(e) => {
+                      console.log(`❌ Image failed to load:`, e.target.src);
+                      e.target.style.display = 'none';
+                    }}
+                    onLoad={() => console.log(`✅ Image loaded:`, image.image_url || image.filename)}
+                  />
+                  <div className="violation-info">
+                    {image.number_plate && (
+                      <span className="violation-plate">
+                        {image.number_plate}
                       </span>
-                      {image.number_plate && (
-                        <span className="violation-plate">
-                          {image.number_plate}
-                        </span>
-                      )}
-                    </div>
+                    )}
+                    <span className="violation-time">
+                      {new Date(image.created * 1000).toLocaleTimeString()}
+                    </span>
                   </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="helmet-placeholder">
-              <Shield size={64} />
-              <h3>No Violations Detected</h3>
-              <p>Start the main stream to begin helmet detection</p>
-              <p style={{fontSize: '0.8rem', opacity: 0.7}}>
-                Images: {violationImages.length} | 
-                Check console for debug info
-              </p>
-            </div>
-          )}
-        </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="helmet-placeholder">
+            <Shield size={64} />
+            <h3>No Violations Detected</h3>
+            <p>Start the main stream to begin helmet detection</p>
+            <p style={{fontSize: '0.8rem', opacity: 0.7}}>
+              Images: {violationImages.length} | 
+              Check console for debug info
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Video Controls Section */}
@@ -738,16 +759,16 @@ function App() {
         </div>
       )}
 
-      {/* Real Statistics Section */}
+      {/* Real Statistics Section with Visualizations */}
       <div className="stats-section">
-        <h2>📊 Real-Time Statistics</h2>
+        <h2>Real-Time Statistics</h2>
         <div className="stats-grid">
           <StatsCard
             icon={Users}
             title="Vehicles Detected"
             value={stats.totalVehicles}
             subtitle="Total crops saved"
-            color="#4ecdc4"
+            color="var(--accent-blue)"
             loading={loading}
           />
           <StatsCard
@@ -755,7 +776,7 @@ function App() {
             title="Helmet Violations"
             value={stats.totalViolations}
             subtitle="No helmet detected"
-            color="#ff6b6b"
+            color="var(--accent-red)"
             loading={loading}
           />
           <StatsCard
@@ -763,7 +784,7 @@ function App() {
             title="Current FPS"
             value={stats.currentFPS.toFixed(1)}
             subtitle="Frames per second"
-            color="#ffa726"
+            color="var(--accent-orange)"
             loading={loading}
           />
           <StatsCard
@@ -771,7 +792,7 @@ function App() {
             title="Uptime"
             value={Math.floor(stats.uptime / 1000 / 60)}
             subtitle="Minutes running"
-            color="#9c27b0"
+            color="var(--primary-grey)"
             loading={loading}
           />
           <StatsCard
@@ -779,7 +800,7 @@ function App() {
             title="Memory Usage"
             value={`${stats.memoryUsage.toFixed(1)}GB`}
             subtitle="GPU memory"
-            color="#00bcd4"
+            color="var(--accent-green)"
             loading={loading}
           />
           <StatsCard
@@ -787,9 +808,61 @@ function App() {
             title="Detection Rate"
             value={detectionEnabled ? '100%' : '0%'}
             subtitle="Detection active"
-            color={detectionEnabled ? '#4caf50' : '#f44336'}
+            color={detectionEnabled ? 'var(--accent-green)' : 'var(--accent-red)'}
             loading={loading}
           />
+        </div>
+
+        {/* Additional Visualizations */}
+        <div className="chart-container">
+          <div className="chart-title">System Performance</div>
+          <div style={{ display: 'flex', gap: '2rem', justifyContent: 'space-around', flexWrap: 'wrap' }}>
+            <div style={{ textAlign: 'center', minWidth: '150px' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent-blue)' }}>
+                {stats.currentFPS.toFixed(1)}
+              </div>
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>FPS</div>
+              <div className="progress-bar" style={{ marginTop: '0.5rem' }}>
+                <div 
+                  className="progress-fill" 
+                  style={{ 
+                    width: `${Math.min((stats.currentFPS / 30) * 100, 100)}%`,
+                    background: 'var(--accent-blue)'
+                  }}
+                ></div>
+              </div>
+            </div>
+            <div style={{ textAlign: 'center', minWidth: '150px' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent-orange)' }}>
+                {stats.memoryUsage.toFixed(1)}GB
+              </div>
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Memory</div>
+              <div className="progress-bar" style={{ marginTop: '0.5rem' }}>
+                <div 
+                  className="progress-fill" 
+                  style={{ 
+                    width: `${Math.min((stats.memoryUsage / 8) * 100, 100)}%`,
+                    background: 'var(--accent-orange)'
+                  }}
+                ></div>
+              </div>
+            </div>
+            <div style={{ textAlign: 'center', minWidth: '150px' }}>
+              <div style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent-green)' }}>
+                {detectionEnabled ? '100%' : '0%'}
+              </div>
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Detection</div>
+              <div className="progress-bar" style={{ marginTop: '0.5rem' }}>
+                <div 
+                  className="progress-fill" 
+                  style={{ 
+                    width: detectionEnabled ? '100%' : '0%',
+                    background: detectionEnabled ? 'var(--accent-green)' : 'var(--accent-red)'
+                  }}
+                ></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1050,6 +1123,30 @@ function App() {
           </>
         )}
       </div>
+
+      {/* Image Modal */}
+      {showModal && selectedImage && (
+        <div className="modal-overlay" onClick={closeImageModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={closeImageModal}>
+              <XCircle size={20} />
+            </button>
+            <img
+              src={selectedImage.image_url || `${API_BASE_URL}/violation/${selectedImage.filename}`}
+              alt="Violation Detail"
+              className="modal-image"
+            />
+            <div className="modal-info">
+              <h3>Violation Details</h3>
+              {selectedImage.number_plate && (
+                <p><strong>Number Plate:</strong> {selectedImage.number_plate}</p>
+              )}
+              <p><strong>Time:</strong> {new Date(selectedImage.created * 1000).toLocaleString()}</p>
+              <p><strong>Filename:</strong> {selectedImage.filename}</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Loading Overlay */}
       {loading && <LoadingOverlay message="Processing..." />}

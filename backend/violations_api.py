@@ -44,6 +44,7 @@ class Violation(db.Model):
     confidence_score = db.Column(db.Float)
     vehicle_id = db.Column(db.String(50))
     crop_filename = db.Column(db.String(200))
+    no_helmet_count = db.Column(db.Integer, nullable=True, default=1)
     location = db.Column(db.String(100))
     camera_id = db.Column(db.String(50))
     status = db.Column(db.String(20), default='active')
@@ -61,6 +62,7 @@ class Violation(db.Model):
             'confidence_score': self.confidence_score,
             'vehicle_id': self.vehicle_id,
             'crop_filename': self.crop_filename,
+            'no_helmet_count': self.no_helmet_count,
             'location': self.location,
             'camera_id': self.camera_id,
             'status': self.status,

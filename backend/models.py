@@ -29,6 +29,7 @@ class Violation(db.Model):
     confidence_score = db.Column(db.Float, nullable=True)  # Detection confidence
     vehicle_id = db.Column(db.String(50), nullable=True)  # Internal vehicle tracking ID
     crop_filename = db.Column(db.String(200), nullable=True)  # Original crop filename
+    no_helmet_count = db.Column(db.Integer, nullable=True, default=1)  # Number of people without helmets
     
     # Location information (optional)
     location = db.Column(db.String(200), nullable=True)
@@ -54,6 +55,7 @@ class Violation(db.Model):
             'confidence_score': self.confidence_score,
             'vehicle_id': self.vehicle_id,
             'crop_filename': self.crop_filename,
+            'no_helmet_count': self.no_helmet_count,
             'location': self.location,
             'camera_id': self.camera_id,
             'status': self.status

@@ -153,6 +153,7 @@ The `violations` table stores all helmet violation records:
 | `confidence_score` | FLOAT | Detection confidence score |
 | `vehicle_id` | VARCHAR(50) | Internal vehicle tracking ID |
 | `crop_filename` | VARCHAR(200) | Original crop filename |
+| `no_helmet_count` | INTEGER | Number of people detected without helmets |
 | `location` | VARCHAR(200) | Location where violation occurred |
 | `camera_id` | VARCHAR(50) | Camera identifier |
 | `status` | VARCHAR(20) | Violation status (active/resolved/dismissed) |

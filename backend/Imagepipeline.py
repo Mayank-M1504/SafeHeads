@@ -18,18 +18,20 @@ load_dotenv()
 # =============================
 # CONFIGURATION
 # =============================
-BASE_DIR = "violation"      # Folder containing violation images
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.join(SCRIPT_DIR, "violation")      # Folder containing violation images
 MIN_RESOLUTION = 200 * 400  # Minimum width*height allowed (e.g., 400x400)
-PROCESSED_DIR = "processed"  # Folder for processed images
-RESULTS_DIR = "results"      # Folder for analysis results
+PROCESSED_DIR = os.path.join(SCRIPT_DIR, "processed")  # Folder for processed images
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")      # Folder for analysis results
 
-# Gemini AI Configuration
+# OCR Model Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    print("✅ Gemini AI configured successfully")
+    print("✅ OCR model configured successfully")
 else:
-    print("⚠️  Gemini API key not found. Set GEMINI_API_KEY in .env file")
+    print("⚠️  OCR API key not found. Set GEMINI_API_KEY in .env file")
 
 # Database and Cloudinary Configuration
 VIOLATIONS_API_URL = os.getenv('VIOLATIONS_API_URL', 'http://localhost:5001')
@@ -42,17 +44,26 @@ CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET', '')
 PLATE_READING_PROMPT = """
 Look at this image and extract ONLY the number plate text.
 
-IMPORTANT: The number plate must follow this exact format:
-- 2 alphabets + 2 digits + 1 or 2 alphabets + 3 or 4 digits
-- Example: MH12AB1234 or KA01CD567
+CRITICAL REQUIREMENTS:
+1. The number plate must be COMPLETELY VISIBLE in the image
+2. The number plate must follow this exact Indian format:
+   - 2 alphabets + 2 digits + 1 or 2 alphabets + 3 or 4 digits
+   - Example: MH12AB1234 or KA01CD567
 
-This number plate may be in one line or two lines.
-If it's a two-line number plate, combine both lines into a single line of text.
-Return the complete text exactly as you see it on the number plate.
+3. The number plate may be in one line or two lines
+4. If it's a two-line number plate, combine both lines into a single line of text
 
-If the number plate does not match the required format (2 letters + 2 digits + 1-2 letters + 3-4 digits), return "invalid_format".
-If you cannot read the number plate clearly, return "unreadable".
+VALIDATION RULES:
+- If the number plate is partially hidden, cut off, or obscured, return "incomplete_plate"
+- If the number plate is too blurry or unclear to read accurately, return "unreadable"
+- If the number plate does not match the Indian format (2 letters + 2 digits + 1-2 letters + 3-4 digits), return "invalid_format"
+- If no number plate is visible in the image, return "no_plate_visible"
+- If the number plate is too small or low resolution to read clearly, return "low_quality"
+
+ONLY return the complete, clearly visible number plate text if it meets ALL requirements above.
+Do not guess or make up number plate text.
 Do not include any other information or analysis.
+Do not read Number plates of Vehicle other than Scooter or Bike.
 """
 
 # Number plate validation settings
@@ -61,7 +72,7 @@ MAX_PLATE_LENGTH = 20  # Maximum characters for a valid Indian number plate (inc
 
 def normalize_plate_text(plate_text):
     """Normalize number plate text by removing dashes, spaces, newlines, and converting to uppercase."""
-    if not plate_text or plate_text.lower() in ['unreadable', 'error', 'gemini_not_configured']:
+    if not plate_text or plate_text.lower() in ['unreadable', 'error', 'gemini_not_configured', 'incomplete_plate', 'no_plate_visible', 'low_quality']:
         return None
     
     # Remove dashes, spaces, newlines, and convert to uppercase
@@ -75,8 +86,8 @@ def is_valid_plate(plate_text):
     if not normalized:
         return False
     
-    # Check for invalid responses from Gemini
-    if normalized in ['UNREADABLE', 'INVALID_FORMAT', 'ERROR', 'GEMINI_NOT_CONFIGURED']:
+    # Check for invalid responses from OCR
+    if normalized in ['UNREADABLE', 'INVALID_FORMAT', 'ERROR', 'OCR_NOT_CONFIGURED', 'INCOMPLETE_PLATE', 'NO_PLATE_VISIBLE', 'LOW_QUALITY']:
         return False
     
     # Check length (Indian plates are typically 8-10 characters)
@@ -164,33 +175,11 @@ def save_violation_to_database(violation_data):
         print(f"   API URL: {VIOLATIONS_API_URL}/api/violations")
         return False
 
-def list_available_gemini_models():
-    """List available Gemini models for debugging."""
-    if not GEMINI_API_KEY:
-        print("⚠️ Gemini API key not configured")
-        return []
-    
-    try:
-        models = genai.list_models()
-        available_models = []
-        
-        print("📋 Available Gemini models:")
-        for model in models:
-            model_name = model.name
-            if 'gemini' in model_name.lower():
-                available_models.append(model_name)
-                print(f"  ✅ {model_name}")
-        
-        return available_models
-        
-    except Exception as e:
-        print(f"❌ Error listing models: {e}")
-        return []
 
 # =============================
 # FILENAME PARSING
 # =============================
-FILENAME_REGEX = re.compile(r"violation_vehicle_.*?_ID(\d+)_([0-9]+)x([0-9]+)_conf([0-9.]+)\.jpg", re.IGNORECASE)
+FILENAME_REGEX = re.compile(r"violation_vehicle_.*?_ID(\d+)_([0-9]+)x([0-9]+)_conf([0-9.]+)_nohelmets(\d+)\.jpg", re.IGNORECASE)
 
 def parse_filename(filename):
     match = FILENAME_REGEX.match(filename)
@@ -199,54 +188,18 @@ def parse_filename(filename):
     vehicle_id = match.group(1)
     width, height = int(match.group(2)), int(match.group(3))
     confidence = float(match.group(4))
+    no_helmet_count = int(match.group(5))
     resolution = width * height
-    return vehicle_id, width, height, confidence, resolution
+    return vehicle_id, width, height, confidence, resolution, no_helmet_count
+
 
 # =============================
-# IMAGE ENHANCEMENT FUNCTION
+# OCR NUMBER PLATE READING
 # =============================
-def enhance_image(image_path):
-    """Enhance image clarity and make number plate more readable."""
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            print(f"❌ Could not load image: {image_path}")
-            return None
-
-        # Convert to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Step 1: Contrast Enhancement (CLAHE)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        # Step 2: Sharpening Filter
-        sharpening_kernel = np.array([
-            [-1, -1, -1],
-            [-1, 9, -1],
-            [-1, -1, -1]
-        ])
-        sharpened = cv2.filter2D(enhanced, -1, sharpening_kernel)
-
-        # Step 3: Brightness Normalization (Histogram Stretching)
-        normalized = cv2.normalize(sharpened, None, 0, 255, cv2.NORM_MINMAX)
-
-        # Step 4: Optional — slight denoising
-        denoised = cv2.fastNlMeansDenoising(normalized, h=10)
-
-        return denoised
-
-    except Exception as e:
-        print(f"❌ Error enhancing {image_path}: {e}")
-        return None
-
-# =============================
-# GEMINI NUMBER PLATE READING
-# =============================
-def read_number_plate_with_gemini(image_path):
-    """Read number plate using Gemini AI."""
+def read_number_plate_with_ocr(image_path):
+    """Read number plate using OCR model."""
     if not GEMINI_API_KEY:
-        return "gemini_not_configured"
+        return "ocr_not_configured"
     
     # Try different model names in order of preference (newest first)
     model_names = [
@@ -262,12 +215,12 @@ def read_number_plate_with_gemini(image_path):
     
     for model_name in model_names:
         try:
-            print(f"🤖 Trying Gemini model: {model_name}")
+            print(f"🤖 Trying OCR model: {model_name}")
             
             # Load the image
             img = Image.open(image_path)
             
-            # Initialize Gemini model
+            # Initialize OCR model
             model = genai.GenerativeModel(model_name)
             
             # Analyze the image
@@ -279,8 +232,11 @@ def read_number_plate_with_gemini(image_path):
             print(f"✅ Successfully used model: {model_name}")
             
             # Clean up the response
-            if "unreadable" in plate_text.lower():
-                return "unreadable"
+            plate_text_lower = plate_text.lower().strip()
+            
+            # Check for specific error responses
+            if any(error in plate_text_lower for error in ['unreadable', 'incomplete_plate', 'no_plate_visible', 'low_quality', 'invalid_format']):
+                return plate_text_lower
             
             # Remove any extra text and return just the plate
             lines = plate_text.split('\n')
@@ -296,7 +252,7 @@ def read_number_plate_with_gemini(image_path):
             continue
     
     # If all models failed
-    print(f"❌ All Gemini models failed for {image_path}")
+    print(f"❌ All OCR models failed for {image_path}")
     return "error"
 
 # =============================
@@ -339,28 +295,16 @@ class ViolationImageProcessor:
                 print(f"⚠️ Could not parse filename: {filename}")
                 return
             
-            vehicle_id, width, height, confidence, resolution = parsed
+            vehicle_id, width, height, confidence, resolution, no_helmet_count = parsed
             
             # Check minimum resolution
             if resolution < MIN_RESOLUTION:
                 print(f"⏭️ Skipping {filename}: resolution too low ({width}x{height})")
                 return
             
-            # Enhance the image
-            enhanced_img = enhance_image(image_path)
-            if enhanced_img is None:
-                print(f"❌ Failed to enhance image: {filename}")
-                return
-            
-            # Save enhanced image
-            enhanced_filename = filename.replace('.jpg', '_enhanced.jpg')
-            enhanced_path = os.path.join(PROCESSED_DIR, enhanced_filename)
-            cv2.imwrite(enhanced_path, enhanced_img)
-            print(f"✅ Enhanced image saved: {enhanced_filename}")
-            
-            # Read number plate with Gemini using raw image (better for two-line plates)
-            print(f"🤖 Reading number plate with Gemini...")
-            plate_text = read_number_plate_with_gemini(image_path)  # Use raw image for better OCR accuracy
+            # Read number plate with OCR using original image
+            print(f"🤖 Reading number plate with OCR...")
+            plate_text = read_number_plate_with_ocr(image_path)
             print(f"🔖 Raw plate text: {plate_text}")
             
             # Validate and normalize plate text
@@ -396,13 +340,14 @@ class ViolationImageProcessor:
                 violation_data = {
                     'number_plate': normalized_plate,
                     'violation_type': 'no_helmet',
-                    'violation_description': 'Helmet violation detected - no helmet worn',
+                    'violation_description': f'Helmet violation detected - {no_helmet_count} person(s) without helmet',
                     'image_url': cloudinary_result['url'],
                     'image_public_id': cloudinary_result['public_id'],
                     'violation_timestamp': datetime.fromtimestamp(time.time()).isoformat(),
                     'confidence_score': confidence,
                     'vehicle_id': vehicle_id,
                     'crop_filename': filename,
+                    'no_helmet_count': no_helmet_count,
                     'location': 'Unknown',  # Can be enhanced later
                     'camera_id': 'Unknown',  # Can be enhanced later
                     'status': 'active'
@@ -421,13 +366,13 @@ class ViolationImageProcessor:
             # Create result record
             result = {
                 'original_file': filename,
-                'enhanced_file': enhanced_filename,
                 'vehicle_id': vehicle_id,
                 'resolution': f"{width}x{height}",
                 'confidence': confidence,
+                'no_helmet_count': no_helmet_count,
                 'plate_text': plate_text,
                 'normalized_plate': normalized_plate,
-                'ocr_source': 'raw_image',  # Indicates OCR was performed on raw image
+                'ocr_source': 'original_image',  # Indicates OCR was performed on original image
                 'timestamp': time.time(),
                 'processed_at': time.strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -450,6 +395,7 @@ class ViolationImageProcessor:
             
             print(f"✅ Processing complete: {filename}")
             print(f"   🔖 Plate: '{plate_text}' → '{normalized_plate}'")
+            print(f"   🚫 No-helmets: {no_helmet_count}")
             print(f"   📄 Result saved: {result_filename}")
             
         except Exception as e:
@@ -489,14 +435,11 @@ class ParallelImagePipeline:
         
         print("✅ Pipeline started successfully!")
         
-        # List available Gemini models for debugging
+        # OCR model is ready
         if GEMINI_API_KEY:
-            print("\n🔍 Checking available Gemini models...")
-            available_models = list_available_gemini_models()
-            if available_models:
-                print(f"✅ Found {len(available_models)} Gemini models")
-            else:
-                print("⚠️ No Gemini models found")
+            print("✅ OCR model ready for processing")
+        else:
+            print("⚠️ OCR model not configured")
         
         print("🔍 Polling for new violation images...")
         

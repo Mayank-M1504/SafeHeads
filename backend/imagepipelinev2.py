@@ -6,8 +6,10 @@ from PIL import Image
 # =============================
 # CONFIGURATION
 # =============================
-INPUT_DIR = "violation"      # Folder containing vehicle images
-OUTPUT_DIR = "enhanced"      # Folder to save enhanced images
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(SCRIPT_DIR, "violation")      # Folder containing vehicle images
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "enhanced")      # Folder to save enhanced images
 MIN_RESOLUTION = 200 * 400   # Minimum width*height allowed (e.g., 400x400)
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
